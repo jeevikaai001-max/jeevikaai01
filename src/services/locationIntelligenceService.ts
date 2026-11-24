@@ -1399,8 +1399,7 @@ class LocationIntelligenceService {
             const { latitude, longitude, accuracy } = position.coords;
             const accuracyMeters = Math.round(accuracy || 45);
 
-            // Multi-tiered reverse geocoding:
-            // 1. First try BigDataCloud Free Client Reverse Geocoding (fast, CORS-friendly, zero rate-limit on client)
+            // Reverse-Geocoding FIRST: OpenStreetMap Nominatim with zoom=18 for exact village/town/city level precision
             let addr: any = {};
             let isGeocoded = false;
             let rawDistrict = '';
@@ -1409,47 +1408,45 @@ class LocationIntelligenceService {
             let state = 'Uttar Pradesh';
 
             try {
-              const bdcRes = await fetch(
-                `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`
+              const res = await fetch(
+                `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=18&addressdetails=1`,
+                { headers: { 'Accept': 'application/json' } }
               );
-              if (bdcRes.ok) {
-                const bdc = await bdcRes.json();
-                const adminList = bdc.localityInfo?.administrative || [];
-                const districtEntry = adminList.find(
-                  (a: any) =>
-                    (a.adminLevel === 6 || a.adminLevel === 5 || a.adminLevel === 4) &&
-                    !a.name.toLowerCase().includes('division') &&
-                    !a.name.toLowerCase().includes('mandal')
-                );
-                rawDistrict = districtEntry?.name || bdc.city || bdc.locality || '';
-                if (bdc.principalSubdivision) state = bdc.principalSubdivision;
-                if (bdc.locality) locality = bdc.locality;
-                if (bdc.postcode) pincode = bdc.postcode;
-                if (rawDistrict) isGeocoded = true;
+              if (res.ok) {
+                const data = await res.json();
+                addr = data.address || {};
+                locality = addr.village || addr.hamlet || addr.town || addr.city || addr.suburb || addr.neighbourhood || addr.residential || addr.road || '';
+                rawDistrict = addr.state_district || addr.county || addr.city || addr.district || '';
+                if (addr.state) state = addr.state;
+                if (addr.postcode) pincode = addr.postcode;
+                if (rawDistrict || locality) isGeocoded = true;
               }
             } catch (e) {
-              // BigDataCloud failed, proceed to next
+              // Nominatim failed
             }
 
-            // 2. Secondary fallback: OpenStreetMap Nominatim with zoom=14
-            if (!rawDistrict) {
+            // Secondary fallback: BigDataCloud Reverse Geocoding
+            if (!rawDistrict && !locality) {
               try {
-                const res = await fetch(
-                  `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=14&addressdetails=1`,
-                  { headers: { 'Accept': 'application/json' } }
+                const bdcRes = await fetch(
+                  `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`
                 );
-                if (res.ok) {
-                  const data = await res.json();
-                  addr = data.address || {};
-                  rawDistrict = addr.state_district || addr.county || addr.city || addr.town || addr.municipality || '';
-                  if (!locality) locality = addr.village || addr.suburb || addr.neighbourhood || addr.residential || addr.hamlet || addr.road || '';
-                  if (!pincode) pincode = addr.postcode || '';
-                  if (addr.state) state = addr.state;
+                if (bdcRes.ok) {
+                  const bdc = await bdcRes.json();
+                  const adminList = bdc.localityInfo?.administrative || [];
+                  const districtEntry = adminList.find(
+                    (a: any) =>
+                      (a.adminLevel === 6 || a.adminLevel === 5 || a.adminLevel === 4) &&
+                      !a.name.toLowerCase().includes('division') &&
+                      !a.name.toLowerCase().includes('mandal')
+                  );
+                  rawDistrict = districtEntry?.name || bdc.city || bdc.locality || '';
+                  if (bdc.principalSubdivision) state = bdc.principalSubdivision;
+                  if (!locality && bdc.locality) locality = bdc.locality;
+                  if (bdc.postcode) pincode = bdc.postcode;
                   if (rawDistrict) isGeocoded = true;
                 }
-              } catch {
-                // Nominatim fetch failed or throttled
-              }
+              } catch (e) {}
             }
 
             let cleanDistrict = rawDistrict ? rawDistrict.replace(/district/i, '').trim() : '';
