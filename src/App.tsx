@@ -150,7 +150,7 @@ export function App() {
     }
     locationIntelligenceService.fetchLocationData(locToFetch, currentLang, profile);
     return () => unsub();
-  }, [profile?.location]);
+  }, [profile?.location, activeLocation, currentLang]);
 
   useEffect(() => {
     const accuracy = locationIntelligenceService.getLocationAccuracy();
