@@ -25,12 +25,13 @@ export interface VoiceChatResponse {
   error?: string;
 }
 
-const DEFAULT_CLOUDFLARE_WORKER_URL = 'https://ai.jeevikaai001.workers.dev';
+const DEFAULT_CLOUDFLARE_WORKER_URL = 'https://profileai.jeevikaai001.workers.dev';
+const FALLBACK_CLOUDFLARE_WORKER_URL = 'https://ai.jeevikaai001.workers.dev';
 
 /**
  * Returns the normalized Cloudflare Worker base URL (from VITE_CLOUDFLARE_WORKER_URL or default).
- * Supports either base origin ("https://ai.jeevikaai001.workers.dev")
- * or a full endpoint URL ("https://ai.jeevikaai001.workers.dev/api/chat") by stripping trailing /api/*.
+ * Supports either base origin ("https://profileai.jeevikaai001.workers.dev")
+ * or a full endpoint URL ("https://profileai.jeevikaai001.workers.dev/api/assessment-turn") by stripping trailing /api/*.
  */
 export function getCloudflareWorkerBaseUrl(): string {
   try {
@@ -48,8 +49,9 @@ export function isCloudflareWorkerConfigured(): boolean {
 }
 
 /**
- * Calls a JeevikaAI backend endpoint via Cloudflare Worker
- * with automatic fallback to local Express /api/* routes if Worker returns an error.
+ * Calls a JeevikaAI backend endpoint via the primary Cloudflare Worker
+ * (https://profileai.jeevikaai001.workers.dev) with automatic fallback to
+ * the secondary Worker and local Express /api/* routes if needed.
  */
 async function postAiRoute<T = any>(
   apiPath: string,
@@ -60,9 +62,13 @@ async function postAiRoute<T = any>(
   const workerBase = getCloudflareWorkerBaseUrl();
   const body = JSON.stringify(payload);
 
-  const endpoints: string[] = workerBase
-    ? [`${workerBase}${normalizedPath}`, normalizedPath]
-    : [normalizedPath];
+  const candidateBases = [workerBase, FALLBACK_CLOUDFLARE_WORKER_URL].filter(
+    (base, idx, arr) => Boolean(base) && arr.indexOf(base) === idx
+  );
+  const endpoints: string[] = [
+    ...candidateBases.map((base) => `${base}${normalizedPath}`),
+    normalizedPath,
+  ];
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
