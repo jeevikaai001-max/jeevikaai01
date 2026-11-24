@@ -7,11 +7,12 @@ import {
   ConversationState,
 } from '../types';
 import { STEPS, DEMO, LANG_CONFIG } from '../data/mockData';
-import { speechService, SpeechRecognitionResultWrapper } from '../services/speechService';
+import { speechService } from '../services/speechService';
 import { splitList } from '../services/recommendationEngine';
 import { storageService } from '../services/storageService';
 import { locationIntelligenceService } from '../services/locationIntelligenceService';
 import { AudioVisualizer } from './AudioVisualizer';
+import { useVoiceAssessmentBridge } from '../hooks/useVoiceAssessmentBridge';
 
 interface AssessmentProps {
   initialProfile?: BeneficiaryProfile | null;
@@ -61,16 +62,12 @@ export const Assessment: React.FC<AssessmentProps> = ({
     return initialProfile ? { ...initialProfile } : { ...blankProfile };
   });
 
-  // -1 indicates the conversational intro/greeting phase
+  // -1 indicates the conversational intro/greeting phase; STEPS.length (8) indicates readback review
   const [currentStepIndex, setCurrentStepIndex] = useState<number>(-1);
   const [conversationState, setConversationState] = useState<ConversationState>('idle');
-  const [heardText, setHeardText] = useState<string>('');
-  const [interimText, setInterimText] = useState<string>('');
   const [editingTranscriptValue, setEditingTranscriptValue] = useState<string>('');
   const [isEditingTranscript, setIsEditingTranscript] = useState<boolean>(false);
-  const [clarificationPrompt, setClarificationPrompt] = useState<string>('');
   const [readbackText, setReadbackText] = useState<string>('');
-  const [errorMessage, setErrorMessage] = useState<string>('');
   const [inputMode, setInputMode] = useState<'voice' | 'text'>('voice');
   const [isDetectingGps, setIsDetectingGps] = useState<boolean>(false);
 
@@ -78,17 +75,12 @@ export const Assessment: React.FC<AssessmentProps> = ({
     return !localStorage.getItem('jeevika_consent_given');
   });
 
-  const speechDebounceTimerRef = useRef<any>(null);
-  const fallbackSilenceTimerRef = useRef<any>(null);
-  const turnInProgressRef = useRef<boolean>(false);
-  const activeStepRef = useRef<number>(-1);
   const profileRef = useRef<BeneficiaryProfile>(answers);
   const currentLangRef = useRef<SupportedLanguage>(currentLang);
   const prefetchedGpsRef = useRef<string>('');
-
-  useEffect(() => {
-    activeStepRef.current = currentStepIndex;
-  }, [currentStepIndex]);
+  const readbackTextRef = useRef<string>('');
+  const initiateReadbackRef = useRef<(lang?: SupportedLanguage) => void>(() => {});
+  const confirmSubmitRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     profileRef.current = answers;
@@ -97,6 +89,17 @@ export const Assessment: React.FC<AssessmentProps> = ({
   useEffect(() => {
     currentLangRef.current = currentLang;
   }, [currentLang]);
+
+  useEffect(() => {
+    readbackTextRef.current = readbackText;
+  }, [readbackText]);
+
+  const applyProfilePatch = useCallback((patch: Partial<BeneficiaryProfile>): BeneficiaryProfile => {
+    const next: BeneficiaryProfile = { ...profileRef.current, ...patch };
+    profileRef.current = next;
+    setAnswers(next);
+    return next;
+  }, []);
 
   // Silently pre-fetch GPS location in the background so it is ready by Step 6
   useEffect(() => {
@@ -107,20 +110,12 @@ export const Assessment: React.FC<AssessmentProps> = ({
         if (!mounted || !res?.location) return;
         prefetchedGpsRef.current = res.location;
         if (!profileRef.current.location) {
-          setAnswers((prev) => ({
-            ...prev,
+          applyProfilePatch({
             location: res.location,
             locationAccuracy: res.accuracyLevel,
             locationConfidence: res.confidenceScore,
             locationAccuracyMeters: res.accuracyMeters,
-          }));
-          profileRef.current = {
-            ...profileRef.current,
-            location: res.location,
-            locationAccuracy: res.accuracyLevel,
-            locationConfidence: res.confidenceScore,
-            locationAccuracyMeters: res.accuracyMeters,
-          };
+          });
         }
       })
       .catch(() => {
@@ -129,17 +124,7 @@ export const Assessment: React.FC<AssessmentProps> = ({
     return () => {
       mounted = false;
     };
-  }, []);
-
-  // Teardown speech and audio timers on unmount
-  useEffect(() => {
-    return () => {
-      speechService.stopSpeaking();
-      speechService.stopListening();
-      if (speechDebounceTimerRef.current) clearTimeout(speechDebounceTimerRef.current);
-      if (fallbackSilenceTimerRef.current) clearTimeout(fallbackSilenceTimerRef.current);
-    };
-  }, []);
+  }, [applyProfilePatch]);
 
   const getIntroGreeting = useCallback((langOverride?: SupportedLanguage) => {
     const lang = langOverride || currentLangRef.current;
@@ -176,64 +161,72 @@ export const Assessment: React.FC<AssessmentProps> = ({
     [getIntroGreeting]
   );
 
-  const startListeningForStep = useCallback(
-    (stepIdx: number, langOverride?: SupportedLanguage) => {
-      const lang = langOverride || currentLangRef.current;
-      setConversationState('listening');
-      setErrorMessage('');
-      turnInProgressRef.current = false;
+  const voiceBridge = useVoiceAssessmentBridge({
+    currentLang,
+    inputMode,
+    steps: STEPS,
+    getStepQuestionText,
+    getProfile: () => profileRef.current,
+    onApplyProfilePatch: applyProfilePatch,
+    onStepChange: setCurrentStepIndex,
+    onStateChange: setConversationState,
+    onTriggerReadback: (lang) => initiateReadbackRef.current(lang),
+    onConfirmSubmit: () => confirmSubmitRef.current(),
+    getReadbackText: () => readbackTextRef.current,
+    getPrefetchedGps: () => prefetchedGpsRef.current,
+  });
 
-      speechService.startListening(
-        lang,
-        (result: SpeechRecognitionResultWrapper) => {
-          setErrorMessage('');
-          setConversationState('listening');
-          handleSpeechResult(result, stepIdx);
-        },
-        (errorMsg: string, code?: string) => {
-          if (code === 'no-speech' || code === 'aborted') {
-            if (!speechService.isCurrentlySpeaking()) {
-              setConversationState('listening');
-            }
-          } else {
-            setConversationState('recoverable_error');
-            setErrorMessage(errorMsg);
-          }
-        },
-        () => {
-          // Recognition ended
-        }
-      );
+  const {
+    heardText,
+    interimText,
+    aiReply,
+    errorMessage,
+    setHeardText,
+    setInterimText,
+    setAiReply,
+    startListeningForStep,
+    speakPromptAndListen,
+    transitionToStep,
+    processUtterance,
+    stopAllVoice,
+    setActiveStepIndex,
+  } = voiceBridge;
+
+  useEffect(() => {
+    setActiveStepIndex(currentStepIndex);
+  }, [currentStepIndex, setActiveStepIndex]);
+
+  const initiateReadbackSummary = useCallback(
+    async (langOverride?: SupportedLanguage) => {
+      const lang = langOverride || currentLangRef.current;
+      stopAllVoice();
+      setCurrentStepIndex(STEPS.length);
+      setActiveStepIndex(STEPS.length);
+      setConversationState('readback_review');
+
+      const verbalSummary = await speechService.generateReadback(profileRef.current, lang);
+      setReadbackText(verbalSummary);
+      readbackTextRef.current = verbalSummary;
+
+      speakPromptAndListen(STEPS.length, verbalSummary, lang, 'readback_review');
     },
-    []
+    [setActiveStepIndex, speakPromptAndListen, stopAllVoice]
   );
+
+  initiateReadbackRef.current = initiateReadbackSummary;
 
   const startConversation = useCallback(
     async (langOverride?: SupportedLanguage) => {
       const lang = langOverride || currentLangRef.current;
       localStorage.setItem('jeevika_consent_given', 'true');
       setShowConsentModal(false);
-      setErrorMessage('');
-
       await speechService.requestMicrophonePermission();
 
-      speechService.stopListening();
-      speechService.stopSpeaking();
-
-      setCurrentStepIndex(-1);
-      activeStepRef.current = -1;
-      setConversationState('asking_question');
-      turnInProgressRef.current = false;
-
       const greetingText = getIntroGreeting(lang);
-
-      speechService.speak(greetingText, lang, () => {
-        if (inputMode === 'voice' && activeStepRef.current === -1 && !turnInProgressRef.current) {
-          startListeningForStep(-1, lang);
-        }
-      });
+      setAiReply('');
+      speakPromptAndListen(-1, greetingText, lang, 'asking_question');
     },
-    [getIntroGreeting, inputMode, startListeningForStep]
+    [getIntroGreeting, setAiReply, speakPromptAndListen]
   );
 
   useEffect(() => {
@@ -249,241 +242,35 @@ export const Assessment: React.FC<AssessmentProps> = ({
     }
   }, [autoStart, onResetAutoStart, startConversation]);
 
-  const askQuestionAloud = (stepIdx: number, langOverride?: SupportedLanguage) => {
-    const lang = langOverride || currentLangRef.current;
-    if (stepIdx >= STEPS.length) {
-      initiateReadbackSummary(lang);
-      return;
-    }
-
-    if (speechDebounceTimerRef.current) clearTimeout(speechDebounceTimerRef.current);
-    if (fallbackSilenceTimerRef.current) clearTimeout(fallbackSilenceTimerRef.current);
-
-    setCurrentStepIndex(stepIdx);
-    activeStepRef.current = stepIdx;
-    setConversationState('asking_question');
-    turnInProgressRef.current = false;
-
-    speechService.stopListening();
-    speechService.stopSpeaking();
-
-    setHeardText('');
-    setInterimText('');
-    setErrorMessage('');
-    setClarificationPrompt('');
-
-    const questionText = getStepQuestionText(stepIdx, lang);
-
-    speechService.speak(questionText, lang, () => {
-      if (inputMode === 'voice' && activeStepRef.current === stepIdx && !turnInProgressRef.current) {
-        startListeningForStep(stepIdx, lang);
-      }
-    });
-  };
-
-  const handleSpeechResult = (result: SpeechRecognitionResultWrapper, stepIdx: number) => {
-    if (turnInProgressRef.current || stepIdx !== activeStepRef.current) return;
-
-    setConversationState('listening');
-
-    const isNameStep = stepIdx >= 0 && STEPS[stepIdx]?.key === 'name';
-    const cleanTranscript = speechService.deduplicateSpokenText(result.transcript, isNameStep);
-    if (!cleanTranscript) return;
-
-    if (result.isFinal) {
-      setInterimText('');
-      setHeardText(cleanTranscript);
-
-      if (speechDebounceTimerRef.current) clearTimeout(speechDebounceTimerRef.current);
-      if (fallbackSilenceTimerRef.current) clearTimeout(fallbackSilenceTimerRef.current);
-
-      speechDebounceTimerRef.current = setTimeout(() => {
-        if (!turnInProgressRef.current && cleanTranscript && stepIdx === activeStepRef.current) {
-          dispatchAnswerProcessing(cleanTranscript, stepIdx);
-        }
-      }, 650);
-    } else {
-      setInterimText(cleanTranscript);
-      setHeardText(cleanTranscript);
-
-      if (fallbackSilenceTimerRef.current) clearTimeout(fallbackSilenceTimerRef.current);
-      fallbackSilenceTimerRef.current = setTimeout(() => {
-        if (!turnInProgressRef.current && cleanTranscript && stepIdx === activeStepRef.current) {
-          setHeardText(cleanTranscript);
-          dispatchAnswerProcessing(cleanTranscript, stepIdx);
-        }
-      }, 1500);
-    }
-  };
-
-  const dispatchAnswerProcessing = async (transcript: string, stepIdx: number) => {
-    if (turnInProgressRef.current || stepIdx !== activeStepRef.current) return;
-    turnInProgressRef.current = true;
-
-    if (speechDebounceTimerRef.current) clearTimeout(speechDebounceTimerRef.current);
-    if (fallbackSilenceTimerRef.current) clearTimeout(fallbackSilenceTimerRef.current);
-
-    speechService.stopListening();
-    speechService.stopSpeaking();
-
-    setConversationState('processing_answer');
-
-    const lang = currentLangRef.current;
-    const isIntro = stepIdx === -1;
-    const currentStepConfig = !isIntro ? STEPS[stepIdx] : null;
-    const stepKey = isIntro ? 'intro' : currentStepConfig!.key;
-    const questionText = getStepQuestionText(stepIdx, lang);
-    const dedupedInput = speechService.deduplicateSpokenText(transcript, stepKey === 'name');
-
-    if (stepKey === 'location' && (profileRef.current.location || prefetchedGpsRef.current)) {
-      const lowerIn = dedupedInput.toLowerCase();
-      const isConfirmingGps = ['हां', 'हाँ', 'सही', 'ठीक', 'जी', 'आगे', 'yes', 'ok', 'haan', 'sahi', 'theek', 'ha'].some(
-        (w) => lowerIn === w || lowerIn.startsWith(w + ' ')
-      );
-      if (isConfirmingGps) {
-        const confirmedLoc = profileRef.current.location || prefetchedGpsRef.current;
-        setAnswers((prev) => ({ ...prev, location: confirmedLoc }));
-        profileRef.current = { ...profileRef.current, location: confirmedLoc };
-        speechService.playAudioCue('success');
-        const nextStepIdx = stepIdx + 1;
-        askQuestionAloud(nextStepIdx, lang);
-        return;
-      }
-    }
-
-    try {
-      const aiResponse = await speechService.extractWithGemini(
-        dedupedInput,
-        lang,
-        stepKey,
-        profileRef.current,
-        questionText
-      );
-
-      if (aiResponse.needsClarification && aiResponse.clarificationQuestion) {
-        setClarificationPrompt(aiResponse.clarificationQuestion);
-        speechService.playAudioCue('clarify');
-
-        setConversationState('asking_question');
-        turnInProgressRef.current = false;
-
-        speechService.speak(aiResponse.clarificationQuestion, lang, () => {
-          if (inputMode === 'voice' && activeStepRef.current === stepIdx && !turnInProgressRef.current) {
-            startListeningForStep(stepIdx, lang);
-          }
-        });
-        return;
-      }
-
-      if (isIntro) {
-        if (aiResponse.recognizedIntent === 'start_negative') {
-          setConversationState('idle');
-          if (aiResponse.acknowledgment) {
-            speechService.speak(aiResponse.acknowledgment, lang);
-          }
-          turnInProgressRef.current = false;
-          return;
-        }
-
-        speechService.playAudioCue('success');
-        askQuestionAloud(0, lang);
-        return;
-      }
-
-      const rawExtracted = aiResponse.cleanValue || dedupedInput;
-      const extractedVal = speechService.deduplicateSpokenText(rawExtracted, stepKey === 'name');
-
-      setAnswers((prev) => ({
-        ...prev,
-        [stepKey]: extractedVal,
-      }));
-      profileRef.current = {
-        ...profileRef.current,
-        [stepKey]: extractedVal,
-      };
-
-      speechService.playAudioCue('success');
-
-      const acknowledgment =
-        aiResponse.acknowledgment ||
-        (lang === 'bho' ? 'नोट हो गइल।' : lang === 'en' ? 'Noted.' : 'नोट कर लिया है।');
-
-      const nextStepIdx = stepIdx + 1;
-
-      if (nextStepIdx < STEPS.length) {
-        setCurrentStepIndex(nextStepIdx);
-        activeStepRef.current = nextStepIdx;
-        setConversationState('asking_question');
-        turnInProgressRef.current = false;
-        setHeardText('');
-        setInterimText('');
-
-        const nextPrompt = `${acknowledgment} ${getStepQuestionText(nextStepIdx, lang)}`;
-
-        speechService.speak(nextPrompt, lang, () => {
-          if (inputMode === 'voice' && activeStepRef.current === nextStepIdx && !turnInProgressRef.current) {
-            startListeningForStep(nextStepIdx, lang);
-          }
-        });
-      } else {
-        setCurrentStepIndex(8);
-        activeStepRef.current = 8;
-        setConversationState('readback_review');
+  const askQuestionAloud = useCallback(
+    (stepIdx: number, langOverride?: SupportedLanguage) => {
+      const lang = langOverride || currentLangRef.current;
+      if (stepIdx >= STEPS.length) {
         initiateReadbackSummary(lang);
+        return;
       }
-    } catch (err: any) {
-      console.error('Processing error:', err);
-      setConversationState('recoverable_error');
-      setErrorMessage(
-        lang === 'en'
-          ? 'Could not process voice. Please tap the mic and speak again.'
-          : 'आवाज़ समझने में समस्या हुई। कृपया माइक दबाकर दोबारा बोलें।'
-      );
-      turnInProgressRef.current = false;
-    }
-  };
-
-  const initiateReadbackSummary = async (langOverride?: SupportedLanguage) => {
-    const lang = langOverride || currentLangRef.current;
-    if (speechDebounceTimerRef.current) clearTimeout(speechDebounceTimerRef.current);
-    if (fallbackSilenceTimerRef.current) clearTimeout(fallbackSilenceTimerRef.current);
-
-    speechService.stopListening();
-    activeStepRef.current = 999;
-    setConversationState('readback_review');
-
-    const verbalSummary = await speechService.generateReadback(profileRef.current, lang);
-    setReadbackText(verbalSummary);
-
-    speechService.speak(verbalSummary, lang, () => {
-      if (inputMode === 'voice') {
-        speechService.startListening(
-          lang,
-          (result: SpeechRecognitionResultWrapper) => {
-            if (result.transcript && result.transcript.trim()) {
-              handleConfirmAndGenerateRoadmap();
-            }
-          },
-          () => {},
-          () => {}
-        );
-      }
-    });
-  };
+      setAiReply('');
+      transitionToStep(stepIdx, '', lang, true);
+    },
+    [initiateReadbackSummary, setAiReply, transitionToStep]
+  );
 
   const handleStopSpeaking = () => {
-    speechService.stopSpeaking();
-    speechService.stopListening();
-    if (speechDebounceTimerRef.current) clearTimeout(speechDebounceTimerRef.current);
-    if (fallbackSilenceTimerRef.current) clearTimeout(fallbackSilenceTimerRef.current);
-    turnInProgressRef.current = false;
+    stopAllVoice();
     setConversationState('idle');
   };
+
+  const isReadbackScreen =
+    currentStepIndex >= STEPS.length ||
+    conversationState === 'readback_review' ||
+    conversationState === 'confirming_answer';
 
   const handleMicButtonTap = async () => {
     if (conversationState === 'processing_answer') return;
 
-    if (currentStepIndex === -1 && conversationState === 'idle') {
+    const targetStepIdx = isReadbackScreen ? STEPS.length : currentStepIndex;
+
+    if (targetStepIdx === -1 && conversationState === 'idle') {
       await speechService.requestMicrophonePermission();
       askQuestionAloud(0);
       return;
@@ -491,27 +278,26 @@ export const Assessment: React.FC<AssessmentProps> = ({
 
     if (conversationState === 'asking_question' || speechService.isCurrentlySpeaking()) {
       speechService.stopSpeaking();
-      startListeningForStep(currentStepIndex);
+      startListeningForStep(targetStepIdx);
       return;
     }
 
     if (conversationState === 'listening') {
       const textToProcess = (interimText || heardText).trim();
       if (textToProcess) {
-        dispatchAnswerProcessing(textToProcess, currentStepIndex);
+        processUtterance(textToProcess, targetStepIdx);
       } else {
-        startListeningForStep(currentStepIndex);
+        startListeningForStep(targetStepIdx);
       }
       return;
     }
 
     await speechService.requestMicrophonePermission();
-    startListeningForStep(currentStepIndex);
+    startListeningForStep(targetStepIdx);
   };
 
   const handleReplayQuestion = () => {
-    speechService.stopListening();
-    speechService.stopSpeaking();
+    stopAllVoice();
     if (currentStepIndex === -1) {
       startConversation();
     } else {
@@ -524,7 +310,7 @@ export const Assessment: React.FC<AssessmentProps> = ({
     onLanguageChange(newLang);
 
     if (!showConsentModal) {
-      if (conversationState === 'readback_review' || conversationState === 'confirming_answer') {
+      if (isReadbackScreen) {
         initiateReadbackSummary(newLang);
       } else if (currentStepIndex === -1) {
         startConversation(newLang);
@@ -535,17 +321,12 @@ export const Assessment: React.FC<AssessmentProps> = ({
   };
 
   const handlePreviousStep = () => {
-    speechService.stopSpeaking();
-    speechService.stopListening();
-    if (speechDebounceTimerRef.current) clearTimeout(speechDebounceTimerRef.current);
-    if (fallbackSilenceTimerRef.current) clearTimeout(fallbackSilenceTimerRef.current);
-    turnInProgressRef.current = false;
-
+    stopAllVoice();
     if (currentStepIndex > 0) {
       askQuestionAloud(currentStepIndex - 1);
     } else if (currentStepIndex === 0) {
       setCurrentStepIndex(-1);
-      activeStepRef.current = -1;
+      setActiveStepIndex(-1);
       setConversationState('idle');
     } else {
       go('home');
@@ -569,7 +350,7 @@ export const Assessment: React.FC<AssessmentProps> = ({
     const rawVal =
       interimText ||
       heardText ||
-      (currentStepIndex >= 0
+      (currentStepIndex >= 0 && currentStepIndex < STEPS.length
         ? speechService.localizeProfileValue(
             STEPS[currentStepIndex].key,
             (answers[STEPS[currentStepIndex].key] as string) || '',
@@ -578,19 +359,17 @@ export const Assessment: React.FC<AssessmentProps> = ({
         : '');
     setEditingTranscriptValue(rawVal);
     setIsEditingTranscript(true);
-    speechService.stopListening();
-    speechService.stopSpeaking();
+    stopAllVoice();
   };
 
   const handleSaveEditedTranscript = () => {
-    const isNameStep = currentStepIndex >= 0 && STEPS[currentStepIndex]?.key === 'name';
-    const finalVal = speechService.deduplicateSpokenText(editingTranscriptValue.trim(), isNameStep);
+    const finalVal = editingTranscriptValue.trim();
     setIsEditingTranscript(false);
     setHeardText(finalVal);
     setInterimText('');
 
     if (finalVal) {
-      dispatchAnswerProcessing(finalVal, currentStepIndex);
+      processUtterance(finalVal, currentStepIndex);
     }
   };
 
@@ -598,19 +377,13 @@ export const Assessment: React.FC<AssessmentProps> = ({
     if (currentStepIndex < 0 || currentStepIndex >= STEPS.length) return;
     const currentStepConfig = STEPS[currentStepIndex];
 
-    speechService.stopSpeaking();
-    speechService.stopListening();
-
-    setAnswers((prev) => ({ ...prev, [currentStepConfig.key]: value }));
-    profileRef.current = { ...profileRef.current, [currentStepConfig.key]: value };
+    stopAllVoice();
+    applyProfilePatch({ [currentStepConfig.key]: value } as Partial<BeneficiaryProfile>);
 
     const nextStepIdx = currentStepIndex + 1;
     if (nextStepIdx < STEPS.length) {
       askQuestionAloud(nextStepIdx);
     } else {
-      setCurrentStepIndex(8);
-      activeStepRef.current = 8;
-      setConversationState('readback_review');
       initiateReadbackSummary();
     }
   };
@@ -639,20 +412,12 @@ export const Assessment: React.FC<AssessmentProps> = ({
       }
 
       prefetchedGpsRef.current = res.location;
-      setAnswers((prev) => ({
-        ...prev,
+      applyProfilePatch({
         location: res.location,
         locationAccuracy: res.accuracyLevel,
         locationConfidence: res.confidenceScore,
         locationAccuracyMeters: res.accuracyMeters,
-      }));
-      profileRef.current = {
-        ...profileRef.current,
-        location: res.location,
-        locationAccuracy: res.accuracyLevel,
-        locationConfidence: res.confidenceScore,
-        locationAccuracyMeters: res.accuracyMeters,
-      };
+      });
 
       setHeardText(res.location);
       onNotify(`📍 ${res.location} (${res.confidenceScore}%)`);
@@ -664,28 +429,7 @@ export const Assessment: React.FC<AssessmentProps> = ({
           ? `Exact location detected: ${res.location}.`
           : `आपका सटीक स्थान मिल गया: ${res.location}।`;
 
-      speechService.stopSpeaking();
-      speechService.stopListening();
-
-      const nextStepIdx = currentStepIndex + 1;
-      if (nextStepIdx < STEPS.length) {
-        setCurrentStepIndex(nextStepIdx);
-        activeStepRef.current = nextStepIdx;
-        setConversationState('asking_question');
-        turnInProgressRef.current = false;
-
-        const nextPrompt = `${ackText} ${getStepQuestionText(nextStepIdx, lang)}`;
-        speechService.speak(nextPrompt, lang, () => {
-          if (inputMode === 'voice' && activeStepRef.current === nextStepIdx && !turnInProgressRef.current) {
-            startListeningForStep(nextStepIdx, lang);
-          }
-        });
-      } else {
-        setCurrentStepIndex(8);
-        activeStepRef.current = 8;
-        setConversationState('readback_review');
-        initiateReadbackSummary(lang);
-      }
+      transitionToStep(currentStepIndex + 1, ackText, lang, true);
     } catch (err) {
       console.warn('GPS detection failed:', err);
       onNotify(
@@ -699,15 +443,9 @@ export const Assessment: React.FC<AssessmentProps> = ({
   };
 
   const handleConfirmAndGenerateRoadmap = async () => {
-    if (speechDebounceTimerRef.current) clearTimeout(speechDebounceTimerRef.current);
-    if (fallbackSilenceTimerRef.current) clearTimeout(fallbackSilenceTimerRef.current);
-
-    speechService.stopSpeaking();
-    speechService.stopListening();
-
-    turnInProgressRef.current = true;
-    setCurrentStepIndex(8);
-    activeStepRef.current = 999;
+    stopAllVoice();
+    setCurrentStepIndex(STEPS.length);
+    setActiveStepIndex(999);
 
     setConversationState('saving_profile');
     const finalProfile = profileRef.current || answers;
@@ -718,9 +456,10 @@ export const Assessment: React.FC<AssessmentProps> = ({
     onSubmit(finalProfile);
   };
 
+  confirmSubmitRef.current = handleConfirmAndGenerateRoadmap;
+
   const handleLoadDemoProfile = () => {
-    speechService.stopSpeaking();
-    speechService.stopListening();
+    stopAllVoice();
     const demoData = { ...DEMO, isDemo: true };
     setAnswers(demoData);
     profileRef.current = demoData;
@@ -833,7 +572,7 @@ export const Assessment: React.FC<AssessmentProps> = ({
       </div>
 
       {/* Main Conversation Canvas */}
-      {conversationState === 'readback_review' || conversationState === 'confirming_answer' ? (
+      {isReadbackScreen ? (
         /* ======================== CONFIRMATION & VERBAL READBACK REVIEW ======================== */
         <div className="bg-white border border-[#DCE3EA] rounded-2xl p-5 sm:p-6 space-y-4">
           <div className="border-b border-[#DCE3EA] pb-3 flex items-center justify-between gap-2">
@@ -872,53 +611,120 @@ export const Assessment: React.FC<AssessmentProps> = ({
             </div>
           )}
 
-          {/* Summary Cards Grid */}
+          {/* Voice Correction Bar on Readback Review */}
+          <div className="p-3 rounded-xl bg-[#F0F7F6] border border-[#287D73]/25 flex items-center justify-between gap-3">
+            <div className="min-w-0 space-y-0.5">
+              <div className="text-xs font-bold text-[#17365D]">
+                {currentLang === 'en'
+                  ? 'Speak to confirm or correct any detail'
+                  : currentLang === 'bho'
+                  ? 'बोल के सही करीं या आगे बढ़ीं'
+                  : 'बोलकर किसी भी जानकारी में सुधार करें या पुष्टि करें'}
+              </div>
+              <div className="text-[11px] text-[#5F6B76] truncate">
+                {interimText || heardText
+                  ? `“${interimText || heardText}”`
+                  : currentLang === 'en'
+                  ? 'Try: "Change my name to Ayush", "Edit city", or "Yes, looks good"'
+                  : 'बोलें: "नाम आयुष गुप्ता कर दो", "शहर बदलना है", या "हाँ सही है"'}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={handleMicButtonTap}
+              disabled={conversationState === 'processing_answer'}
+              className={`w-11 h-11 rounded-full flex items-center justify-center flex-none text-white transition-all ${
+                conversationState === 'listening'
+                  ? 'bg-[#245A91] ring-4 ring-[#245A91]/25'
+                  : 'bg-[#287D73] hover:bg-[#1E6058]'
+              }`}
+              aria-label="Speak correction on review"
+            >
+              <Icon
+                name={conversationState === 'processing_answer' ? 'refresh' : 'mic'}
+                size={18}
+                className={conversationState === 'processing_answer' ? 'animate-spin' : ''}
+              />
+            </button>
+          </div>
+
+          {aiReply && (
+            <div className="text-xs p-3 rounded-xl bg-[#FFF8EE] border border-[#D9822B]/30 text-[#8F5517]">
+              {aiReply}
+            </div>
+          )}
+
+          {/* Summary Cards Grid (tap any card to edit that step directly) */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
-            <div className="p-3 bg-[#F7F9FC] rounded-xl border border-[#DCE3EA]">
+            <button
+              type="button"
+              onClick={() => askQuestionAloud(STEPS.findIndex((s) => s.key === 'name'))}
+              className="p-3 bg-[#F7F9FC] hover:bg-[#EEF4FA] rounded-xl border border-[#DCE3EA] text-left transition-colors"
+            >
               <span className="text-[11px] font-semibold text-[#5F6B76]">
                 {currentLang === 'en' ? 'Name' : 'नाम'}
               </span>
               <div className="font-bold text-[#17365D] mt-0.5 text-sm">{answers.name || '—'}</div>
-            </div>
+            </button>
 
-            <div className="p-3 bg-[#F7F9FC] rounded-xl border border-[#DCE3EA]">
+            <button
+              type="button"
+              onClick={() => askQuestionAloud(STEPS.findIndex((s) => s.key === 'education'))}
+              className="p-3 bg-[#F7F9FC] hover:bg-[#EEF4FA] rounded-xl border border-[#DCE3EA] text-left transition-colors"
+            >
               <span className="text-[11px] font-semibold text-[#5F6B76]">
                 {currentLang === 'en' ? 'Education' : 'शिक्षा'}
               </span>
               <div className="font-bold text-[#17365D] mt-0.5 text-sm">
                 {speechService.localizeProfileValue('education', answers.education, currentLang) || '—'}
               </div>
-            </div>
+            </button>
 
-            <div className="p-3 bg-[#F7F9FC] rounded-xl border border-[#DCE3EA]">
+            <button
+              type="button"
+              onClick={() => askQuestionAloud(STEPS.findIndex((s) => s.key === 'skills'))}
+              className="p-3 bg-[#F7F9FC] hover:bg-[#EEF4FA] rounded-xl border border-[#DCE3EA] text-left transition-colors"
+            >
               <span className="text-[11px] font-semibold text-[#5F6B76]">
                 {currentLang === 'en' ? 'Skills' : 'हुनर / कौशल'}
               </span>
               <div className="font-bold text-[#17365D] mt-0.5">{answers.skills || '—'}</div>
-            </div>
+            </button>
 
-            <div className="p-3 bg-[#F7F9FC] rounded-xl border border-[#DCE3EA]">
+            <button
+              type="button"
+              onClick={() => askQuestionAloud(STEPS.findIndex((s) => s.key === 'interests'))}
+              className="p-3 bg-[#F7F9FC] hover:bg-[#EEF4FA] rounded-xl border border-[#DCE3EA] text-left transition-colors"
+            >
               <span className="text-[11px] font-semibold text-[#5F6B76]">
                 {currentLang === 'en' ? 'Interests' : 'रुचि'}
               </span>
               <div className="font-bold text-[#17365D] mt-0.5">{answers.interests || '—'}</div>
-            </div>
+            </button>
 
-            <div className="p-3 bg-[#F7F9FC] rounded-xl border border-[#DCE3EA]">
+            <button
+              type="button"
+              onClick={() => askQuestionAloud(STEPS.findIndex((s) => s.key === 'location'))}
+              className="p-3 bg-[#F7F9FC] hover:bg-[#EEF4FA] rounded-xl border border-[#DCE3EA] text-left transition-colors"
+            >
               <span className="text-[11px] font-semibold text-[#5F6B76]">
                 {currentLang === 'en' ? 'Exact Location' : 'सटीक स्थान'}
               </span>
               <div className="font-bold text-[#287D73] mt-0.5">{answers.location || '—'}</div>
-            </div>
+            </button>
 
-            <div className="p-3 bg-[#F7F9FC] rounded-xl border border-[#DCE3EA]">
+            <button
+              type="button"
+              onClick={() => askQuestionAloud(STEPS.findIndex((s) => s.key === 'workType'))}
+              className="p-3 bg-[#F7F9FC] hover:bg-[#EEF4FA] rounded-xl border border-[#DCE3EA] text-left transition-colors"
+            >
               <span className="text-[11px] font-semibold text-[#5F6B76]">
                 {currentLang === 'en' ? 'Work Type' : 'काम का प्रकार'}
               </span>
               <div className="font-bold text-[#17365D] mt-0.5">
                 {speechService.localizeProfileValue('workType', answers.workType || 'Job', currentLang)}
               </div>
-            </div>
+            </button>
           </div>
 
           <div className="flex items-center justify-between gap-3 pt-3 border-t border-[#DCE3EA]">
@@ -1294,7 +1100,7 @@ export const Assessment: React.FC<AssessmentProps> = ({
                   type="button"
                   onClick={() => {
                     if (currentFieldVal.trim()) {
-                      dispatchAnswerProcessing(currentFieldVal.trim(), currentStepIndex);
+                      processUtterance(currentFieldVal.trim(), currentStepIndex);
                     } else {
                       handleNextStep();
                     }
@@ -1306,9 +1112,9 @@ export const Assessment: React.FC<AssessmentProps> = ({
               </div>
             )}
 
-            {clarificationPrompt && (
+            {aiReply && (
               <div className="text-xs p-3 rounded-xl bg-[#FFF8EE] border border-[#D9822B]/30 text-[#8F5517]">
-                {clarificationPrompt}
+                {aiReply}
               </div>
             )}
 

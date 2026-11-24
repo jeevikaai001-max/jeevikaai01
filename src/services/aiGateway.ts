@@ -197,12 +197,49 @@ export const aiGateway = {
     currentStep: string;
     existingProfile?: Partial<BeneficiaryProfile>;
     stepQuestion?: string;
+    conversationHistory?: Array<{ role: 'user' | 'ai'; text: string }>;
   }) {
-    return postAiRoute<{ fallback?: boolean; result?: any }>(
+    return postAiRoute<{ fallback?: boolean; schemaVersion?: string; result?: any }>(
       '/api/extract-profile',
       params,
-      12000
+      10000
     );
+  },
+
+  assessmentTurn(params: {
+    message: string;
+    language: SupportedLanguage;
+    currentStep: string;
+    existingProfile?: Partial<BeneficiaryProfile>;
+    stepQuestion?: string;
+    conversationHistory?: Array<{ role: 'user' | 'ai'; text: string }>;
+  }) {
+    return postAiRoute<{
+      fallback?: boolean;
+      schemaVersion?: string;
+      result?: {
+        action?:
+          | 'save_and_next'
+          | 'go_back'
+          | 'go_next'
+          | 'jump_to_step'
+          | 'edit_field'
+          | 'repeat_question'
+          | 'chat_and_stay'
+          | 'confirm_submit'
+          | 'start_affirmative'
+          | 'start_negative';
+        recognizedIntent?: string;
+        cleanValue?: string;
+        multiFieldUpdates?: Partial<Record<keyof BeneficiaryProfile, string>>;
+        targetStep?: keyof BeneficiaryProfile | null;
+        confidence?: number;
+        needsClarification?: boolean;
+        clarificationQuestion?: string;
+        acknowledgment?: string;
+        spokenReply?: string;
+      };
+    }>('/api/assessment-turn', params, 10000);
   },
 
   parseSpeech(params: {

@@ -8,13 +8,29 @@ export interface SpeechRecognitionResultWrapper {
   isFinal: boolean;
 }
 
+export type AssessmentTurnAction =
+  | 'save_and_next'
+  | 'go_back'
+  | 'go_next'
+  | 'jump_to_step'
+  | 'edit_field'
+  | 'repeat_question'
+  | 'chat_and_stay'
+  | 'confirm_submit'
+  | 'start_affirmative'
+  | 'start_negative';
+
 export interface ExtractedAIResponse {
+  action?: AssessmentTurnAction;
   recognizedIntent?: string;
   cleanValue?: string;
+  multiFieldUpdates?: Partial<Record<keyof BeneficiaryProfile, string>>;
+  targetStep?: keyof BeneficiaryProfile | null;
   confidence: number;
   needsClarification: boolean;
   clarificationQuestion?: string;
   acknowledgment?: string;
+  spokenReply?: string;
   suggestedNextTopic?: string;
 }
 
@@ -153,10 +169,16 @@ class SpeechService {
     let text = rawText.trim().replace(/\s+/g, ' ');
 
     if (isNameField) {
-      // Remove conversational prefixes/suffixes around names, even if repeated mid-sentence
+      // Remove conversational prefixes/suffixes around names in Hindi, Bhojpuri, Hinglish, and English
       text = text
-        .replace(/(?:मेरा नाम|हमार नाम|हमर नाम|नाम है|नाम बा|जी मेरा नाम|सर मेरा नाम|मैडम मेरा नाम|my name is|i am|naam hai|mera naam|hamaar naam)\s*/gi, ' ')
-        .replace(/\s+(?:है|बा|हवे|हूँ|हूं|जी|सर|बोल रहा हूँ|बोल रही हूँ|hai|ba|hu|hun|ji)\b\.?/gi, ' ')
+        .replace(
+          /(?:जी\s+|सर\s+|मैडम\s+|हाँ\s+|हां\s+|हेलो\s+|नमस्ते\s+|hello\s+|hi\s+|ji\s+|sir\s+)?(?:मेरा\s+नाम|मेरा\s+नेम|हमार\s+नाम|हमर\s+नाम|नाम\s+है|नाम\s+बा|नाम|मैं|हम|my\s+name\s+is|my\s+name|mera\s+naam|mera\s+name|hamar\s+naam|hamaar\s+naam|naam\s+hai|name\s+is|i\s+am|this\s+is)\s+/gi,
+          ' '
+        )
+        .replace(
+          /\s+(?:है|बा|हवे|हूँ|हूं|जी|सर|बोल\s+रहा\s+हूँ|बोल\s+रही\s+हूँ|बोल\s+रहा|बोल\s+रही|कहते\s+हैं|hai|he|ba|hu|hun|hoon|ji|bol\s+raha\s+hu|bol\s+raha\s+hoon|bol\s+rahi\s+hu)\b\.?/gi,
+          ' '
+        )
         .replace(/\s+/g, ' ')
         .trim();
     }
@@ -671,112 +693,298 @@ class SpeechService {
   }
 
   /**
-   * Conversational profile interpretation:
-   * First applies fast, deterministic fuzzy ("aspaas") matching & deduplication so common answers
-   * resolve in 0ms without delay or false clarification loops, and uses Gemini for complex utterances.
+   * Conversational Gemini-first profile interpretation:
+   * Always sends the raw spoken utterance + conversation context to Gemini (/api/assessment-turn via Worker/Express)
+   * so natural sentences ("मेरा नाम आयुष है"), casual questions ("कैसे हो"), corrections ("नाम बदलकर आयुष गुप्ता कर दो"),
+   * and voice navigation ("पीछे चलो", "आगे बढ़ो", "शहर बदलना है") are understood accurately.
+   * Falls back cleanly to the upgraded local Indic engine ONLY when offline or API is unreachable.
    */
   public async extractWithGemini(
     message: string,
     language: SupportedLanguage,
     currentStepKey: string,
     existingProfile: BeneficiaryProfile,
-    stepQuestion: string
+    stepQuestion: string,
+    conversationHistory: Array<{ role: 'user' | 'ai'; text: string }> = []
   ): Promise<ExtractedAIResponse> {
-    const dedupedMessage = this.deduplicateSpokenText(message, currentStepKey === 'name');
-
-    // Fast local fuzzy extraction first
-    const localResult = this.fallbackIndicExtraction(dedupedMessage, language, currentStepKey);
-
-    // For structured choice steps or high-confidence matches, return immediately for snappy UX
-    if (
-      currentStepKey === 'intro' ||
-      currentStepKey === 'name' ||
-      currentStepKey === 'education' ||
-      currentStepKey === 'workType' ||
-      currentStepKey === 'mobility' ||
-      localResult.confidence >= 0.88
-    ) {
-      return localResult;
+    const rawSpoken = String(message || '').trim().replace(/\s+/g, ' ');
+    if (!rawSpoken) {
+      return {
+        action: 'repeat_question',
+        confidence: 0,
+        needsClarification: true,
+        clarificationQuestion: stepQuestion,
+        spokenReply: stepQuestion,
+      };
     }
 
-    try {
-      const data = await aiGateway.extractProfile({
-        message: dedupedMessage,
-        language,
-        currentStep: currentStepKey,
-        existingProfile,
-        stepQuestion,
-      });
+    if (!this.isOffline()) {
+      try {
+        const data = await aiGateway.assessmentTurn({
+          message: rawSpoken,
+          language,
+          currentStep: currentStepKey,
+          existingProfile,
+          stepQuestion,
+          conversationHistory,
+        });
 
-      if (data && !data.fallback && data.result && data.result.cleanValue) {
-        const cleanedVal = this.deduplicateSpokenText(
-          String(data.result.cleanValue),
-          currentStepKey === 'name'
-        );
-        return {
-          recognizedIntent: data.result.recognizedIntent,
-          cleanValue: cleanedVal || localResult.cleanValue,
-          confidence: typeof data.result.confidence === 'number' ? data.result.confidence : 0.9,
-          needsClarification: false,
-          clarificationQuestion: '',
-          acknowledgment: data.result.acknowledgment || localResult.acknowledgment,
-          suggestedNextTopic: data.result.suggestedNextTopic,
-        };
+        if (data && !data.fallback && data.result) {
+          const r = data.result;
+          const action: AssessmentTurnAction = (r.action as AssessmentTurnAction) || 'save_and_next';
+          const rawClean = typeof r.cleanValue === 'string' ? r.cleanValue.trim() : '';
+          const cleanedVal =
+            rawClean && currentStepKey === 'name'
+              ? this.deduplicateSpokenText(rawClean, true)
+              : rawClean;
+
+          const multiUpdates: Partial<Record<keyof BeneficiaryProfile, string>> = {};
+          if (r.multiFieldUpdates && typeof r.multiFieldUpdates === 'object') {
+            for (const [k, v] of Object.entries(r.multiFieldUpdates)) {
+              if (typeof v === 'string' && v.trim()) {
+                (multiUpdates as any)[k] =
+                  k === 'name' ? this.deduplicateSpokenText(v.trim(), true) : v.trim();
+              }
+            }
+          }
+
+          return {
+            action,
+            recognizedIntent: r.recognizedIntent || currentStepKey,
+            cleanValue: cleanedVal,
+            multiFieldUpdates: Object.keys(multiUpdates).length > 0 ? multiUpdates : undefined,
+            targetStep: r.targetStep || null,
+            confidence: typeof r.confidence === 'number' ? r.confidence : 0.94,
+            needsClarification: Boolean(r.needsClarification || action === 'chat_and_stay'),
+            clarificationQuestion: r.clarificationQuestion || r.spokenReply || '',
+            acknowledgment: r.acknowledgment || r.spokenReply || '',
+            spokenReply: r.spokenReply || r.acknowledgment || r.clarificationQuestion || '',
+          };
+        }
+      } catch {
+        // Fall through to resilient Indic rule engine below
       }
-    } catch {
-      // Fall through to localResult
     }
 
-    return localResult;
+    return this.fallbackIndicExtraction(rawSpoken, language, currentStepKey);
   }
 
   /**
-   * Fuzzy ("aspaas") Indic + English Rule Engine
-   * Matches any nearby word or phrase in Hindi, Bhojpuri, Hinglish, or English and deduplicates cleanly.
+   * Upgraded Indic + English Fallback Engine (used only when offline or Gemini API is unavailable).
+   * Handles voice navigation (back/next/repeat/jump), casual chitchat detection, clean name extraction,
+   * and fuzzy matching across Hindi, Bhojpuri, Hinglish, and English.
    */
   public fallbackIndicExtraction(
     speech: string,
     lang: SupportedLanguage,
     stepKey: string
   ): ExtractedAIResponse {
-    const raw = this.deduplicateSpokenText(speech, stepKey === 'name');
+    const rawUnstripped = String(speech || '').trim().replace(/\s+/g, ' ');
+    const lowerRaw = rawUnstripped.toLowerCase();
+
+    // 0A. Voice Navigation & Edit Commands (work on any step)
+    const backTriggers = ['पीछे', 'पिछला', 'बैक', 'गलत हो गया', 'piche', 'peeche', 'pichla', 'go back', 'previous', 'back'];
+    if (backTriggers.some((w) => lowerRaw.includes(w))) {
+      const reply =
+        lang === 'bho'
+          ? 'ठीक बा, पिछला सवाल पर चलत बानी।'
+          : lang === 'en'
+          ? 'Sure, going back to the previous question.'
+          : 'ठीक है, पिछले सवाल पर वापस चलते हैं।';
+      return {
+        action: 'go_back',
+        recognizedIntent: 'go_back',
+        confidence: 0.92,
+        needsClarification: false,
+        acknowledgment: reply,
+        spokenReply: reply,
+      };
+    }
+
+    const repeatTriggers = ['दोबारा', 'फिर से', 'समझ नहीं आया', 'dobara', 'fir se', 'phir se', 'repeat', 'again'];
+    if (repeatTriggers.some((w) => lowerRaw.includes(w))) {
+      const reply =
+        lang === 'bho'
+          ? 'जी, फिर से पूछत बानी।'
+          : lang === 'en'
+          ? 'Sure, let me repeat the question.'
+          : 'जी बिल्कुल, मैं फिर से सवाल पूछता हूँ।';
+      return {
+        action: 'repeat_question',
+        recognizedIntent: 'repeat_question',
+        confidence: 0.92,
+        needsClarification: false,
+        acknowledgment: reply,
+        spokenReply: reply,
+      };
+    }
+
+    const changeIntent = ['बदल', 'चेंज', 'गलत', 'सुधार', 'change', 'edit', 'galat', 'badal', 'update'].some((w) =>
+      lowerRaw.includes(w)
+    );
+    if (changeIntent) {
+      let targetStep: keyof BeneficiaryProfile | null = null;
+      if (lowerRaw.includes('नाम') || lowerRaw.includes('name') || lowerRaw.includes('naam')) targetStep = 'name';
+      else if (lowerRaw.includes('पढ़ाई') || lowerRaw.includes('शिक्षा') || lowerRaw.includes('education') || lowerRaw.includes('padhai'))
+        targetStep = 'education';
+      else if (lowerRaw.includes('हुनर') || lowerRaw.includes('कौशल') || lowerRaw.includes('skill') || lowerRaw.includes('hunar'))
+        targetStep = 'skills';
+      else if (lowerRaw.includes('रुचि') || lowerRaw.includes('पसंद') || lowerRaw.includes('interest')) targetStep = 'interests';
+      else if (lowerRaw.includes('शहर') || lowerRaw.includes('गाँव') || lowerRaw.includes('जिला') || lowerRaw.includes('location') || lowerRaw.includes('jagah'))
+        targetStep = 'location';
+      else if (lowerRaw.includes('काम') || lowerRaw.includes('नौकरी') || lowerRaw.includes('work')) targetStep = 'workType';
+
+      if (targetStep) {
+        const reply =
+          lang === 'bho'
+            ? 'ठीक बा, ओह जानकारी के बदल देत बानी। बताईं नया जवाब का बा?'
+            : lang === 'en'
+            ? `Sure, let's update your ${targetStep}.`
+            : 'ठीक है, चलिए उस जानकारी को बदलते हैं।';
+        return {
+          action: 'jump_to_step',
+          targetStep,
+          recognizedIntent: 'jump_to_step',
+          confidence: 0.9,
+          needsClarification: false,
+          acknowledgment: reply,
+          spokenReply: reply,
+        };
+      }
+    }
+
+    const skipTriggers = ['आगे बढ़', 'आगे चल', 'नेक्स्ट', 'छोड़ो', 'aage badh', 'aage chal', 'next step', 'skip'];
+    if (stepKey !== 'readback' && skipTriggers.some((w) => lowerRaw.includes(w))) {
+      const reply =
+        lang === 'bho'
+          ? 'ठीक बा, अगला सवाल पर चलत बानी।'
+          : lang === 'en'
+          ? 'Okay, moving to the next question.'
+          : 'ठीक है, अगले सवाल पर चलते हैं।';
+      return {
+        action: 'go_next',
+        recognizedIntent: 'go_next',
+        confidence: 0.9,
+        needsClarification: false,
+        acknowledgment: reply,
+        spokenReply: reply,
+      };
+    }
+
+    // 0B. Casual chitchat / off-topic questions should NEVER be saved as profile values
+    const chitchatTriggers = [
+      'कैसे हो',
+      'क्या कर रहे',
+      'तुम कौन हो',
+      'आप कौन हैं',
+      'kaise ho',
+      'kya kar rahe',
+      'who are you',
+      'how are you',
+      'what are you doing',
+      'ka hal ba',
+      'का हाल बा',
+    ];
+    if (chitchatTriggers.some((w) => lowerRaw.includes(w))) {
+      const reply =
+        lang === 'bho'
+          ? 'हम बिल्कुल बढ़िया बानी जी! रउआ खातिर प्रोफ़ाइल बनावे में मदद करत बानी। चलीं, ई सवाल के जवाब बताईं।'
+          : lang === 'en'
+          ? "I'm doing great! I'm JeevikaAI, here to build your career profile. Please tell me your answer to the current question."
+          : 'मैं बिल्कुल बढ़िया हूँ जी! मैं आपकी आजीविका प्रोफ़ाइल बनाने में मदद कर रहा हूँ। कृपया इस सवाल का जवाब बताइए।';
+      return {
+        action: 'chat_and_stay',
+        recognizedIntent: 'chitchat',
+        cleanValue: '',
+        confidence: 0.5,
+        needsClarification: true,
+        clarificationQuestion: reply,
+        spokenReply: reply,
+      };
+    }
+
+    // 0C. Readback Review Step
+    if (stepKey === 'readback') {
+      const rejectWords = ['नहीं', 'ना', 'गलत', 'बदल', 'no', 'wrong', 'galat', 'nahi', 'change'];
+      if (rejectWords.some((w) => lowerRaw.includes(w))) {
+        const reply =
+          lang === 'bho'
+            ? 'कवन जानकारी बदले के बा — नाम, पढ़ाई, हुनर या जिला? बोलीं, तुरंत सुधार देब।'
+            : lang === 'en'
+            ? 'Which detail would you like to change — name, education, skills, or location?'
+            : 'कौन सी जानकारी बदलनी है — नाम, पढ़ाई, हुनर या शहर? बोलिए, मैं तुरंत सुधार दूँगा।';
+        return {
+          action: 'chat_and_stay',
+          recognizedIntent: 'readback_reject',
+          confidence: 0.85,
+          needsClarification: true,
+          clarificationQuestion: reply,
+          spokenReply: reply,
+        };
+      }
+      const reply =
+        lang === 'bho'
+          ? 'बहुत बढ़िया! अब रउआ रोडमैप तैयार करत बानी।'
+          : lang === 'en'
+          ? 'Awesome! Generating your personalized roadmap now.'
+          : 'बहुत बढ़िया! अब आपका व्यक्तिगत रोडमैप तैयार किया जा रहा है।';
+      return {
+        action: 'confirm_submit',
+        recognizedIntent: 'confirm_submit',
+        confidence: 0.95,
+        needsClarification: false,
+        acknowledgment: reply,
+        spokenReply: reply,
+      };
+    }
+
+    const raw = this.deduplicateSpokenText(rawUnstripped, stepKey === 'name');
     const lower = raw.toLowerCase();
 
     // 1. Intro Step check
     if (stepKey === 'intro') {
       const negativeWords = ['nahi', 'no', 'mat', 'ruko', 'later', 'नहीं', 'ना', 'रुको', 'बाद में'];
       if (negativeWords.some((w) => lower === w || lower.startsWith(w + ' '))) {
+        const reply = lang === 'bho' ? 'कोई बात नइखे, जब तइयार होखब तब बोलीं।' : 'कोई बात नहीं, जब आप तैयार हों तब बताइएगा।';
         return {
+          action: 'start_negative',
           recognizedIntent: 'start_negative',
           confidence: 0.9,
           needsClarification: false,
-          acknowledgment: lang === 'bho' ? 'कोई बात नइखे, जब तइयार होखब तब बोलीं।' : 'कोई बात नहीं, जब आप तैयार हों तब बताइएगा।',
+          acknowledgment: reply,
+          spokenReply: reply,
         };
       }
 
+      const reply = lang === 'bho' ? 'बहुत बढ़िया! आईं शुरू करीं।' : 'बहुत बढ़िया! चलिए शुरू करते हैं।';
       return {
+        action: 'start_affirmative',
         recognizedIntent: 'start_affirmative',
         confidence: 0.96,
         needsClarification: false,
-        acknowledgment: lang === 'bho' ? 'बहुत बढ़िया! आईं शुरू करीं।' : 'बहुत बढ़िया! चलिए शुरू करते हैं।',
+        acknowledgment: reply,
+        spokenReply: reply,
       };
     }
 
-    // 2. Name extraction (with strict deduplication so same name spoken twice is never repeated)
+    // 2. Name extraction (strips filler phrases and deduplicates cleanly)
     if (stepKey === 'name') {
-      const cleanName = this.deduplicateSpokenText(raw, true);
+      const cleanName = this.deduplicateSpokenText(rawUnstripped, true);
       const finalName = cleanName || raw;
+      const reply =
+        lang === 'bho'
+          ? `नमस्ते ${finalName} जी!`
+          : lang === 'en'
+          ? `Welcome ${finalName}!`
+          : `नमस्ते ${finalName} जी, स्वागत है!`;
       return {
+        action: 'save_and_next',
         recognizedIntent: 'name',
         cleanValue: finalName,
-        confidence: 0.95,
+        confidence: 0.9,
         needsClarification: false,
-        acknowledgment:
-          lang === 'bho'
-            ? `नमस्ते ${finalName} जी!`
-            : lang === 'en'
-            ? `Welcome ${finalName}!`
-            : `नमस्ते ${finalName} जी, स्वागत है!`,
+        acknowledgment: reply,
+        spokenReply: reply,
       };
     }
 

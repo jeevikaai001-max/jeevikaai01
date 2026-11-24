@@ -114,17 +114,113 @@ async function generateContentResilient(
   throw lastError || new Error('All models exhausted');
 }
 
-// API Route: AI Conversational Profile Extraction & Guidance
-app.post('/api/extract-profile', async (req: Request, res: Response) => {
+// Shared conversational prompt builder for Voice Profile Assessment
+function buildAssessmentTurnPrompt(params: {
+  message: string;
+  language: string;
+  currentStep: string;
+  stepQuestion: string;
+  existingProfile: Record<string, any>;
+  conversationHistory: Array<{ role: string; text: string }>;
+}) {
+  const { message, language, currentStep, stepQuestion, existingProfile, conversationHistory } = params;
+  const langLabel =
+    language === 'bho'
+      ? 'natural warm Bhojpuri (Devanagari script)'
+      : language === 'en'
+      ? 'clear friendly English'
+      : language === 'hin'
+      ? 'friendly Hinglish'
+      : 'natural warm conversational Hindi (Devanagari script)';
+
+  const historyText = conversationHistory
+    .slice(-8)
+    .map((h) => `${h.role === 'user' ? 'User' : 'JeevikaAI'}: ${clampStr(h.text, 240)}`)
+    .join('\n');
+
+  return `You are JeevikaAI (जीविका एआई), a super-smart, warm, human-like voice livelihood assistant helping an Indian citizen build their profile step-by-step.
+
+PROFILE STEPS IN EXACT SEQUENCE:
+1. "name" - Citizen's personal name ONLY (NEVER include filler phrases like "मेरा नाम", "है", "जी", "my name is", "मैं ... बोल रहा हूँ", "mera name ... hai"). Example: if user says "मेरा नाम आयुष गुप्ता है", cleanValue MUST be "आयुष गुप्ता" (or "Ayush Gupta" if spoken in English).
+2. "education" - MUST map to one of: ["Below 8th class", "8th class pass", "10th pass (Secondary)", "12th pass (Higher Secondary)", "Graduate", "ITI / Diploma"].
+3. "skills" - Clean, concise comma-separated skills (e.g., "सिलाई-कढ़ाई, कंप्यूटर" or "Electrician, Solar PV").
+4. "interests" - Clean, concise comma-separated work/training interests.
+5. "occupation" - Clean current work/student/homemaker/unemployed status (e.g., "छात्र", "दुकान सहायक", "गृहिणी", "अभी कोई काम नहीं").
+6. "location" - Clean Village/Town, District, State (e.g., "गोरखपुर, उत्तर प्रदेश" or "Patna, Bihar").
+7. "workType" - MUST map to one of: ["Job", "Self-employment", "Either"].
+8. "mobility" - MUST map to one of: ["Nearby only (within ~10 km)", "Within my district", "Anywhere in the state"].
+
+Special Step Keys:
+- "intro": Asking if the user is ready to begin the profile assessment.
+- "readback": Reading back the completed profile summary and asking if everything is correct or if they want to change any field.
+
+CURRENT CONTEXT:
+- Current Step Key: "${currentStep}"
+- Current Question Asked: "${stepQuestion}"
+- Output Language for spokenReply: ${langLabel} (code: "${language}")
+- Current Saved Profile So Far: ${JSON.stringify(existingProfile)}
+- Recent Conversation:
+${historyText || '(Start of conversation)'}
+- User Just Spoke: "${message}"
+
+INTELLIGENCE & CONVERSATION RULES (CRITICAL):
+1. ENTITY EXTRACTION — NEVER SAVE RAW SENTENCES:
+   - Extract ONLY the clean core value. Never write "मेरा नाम आयुष है" as name; write "आयुष". Never write "मैं 12वीं पास हूँ भाई" as education; map it to "12th pass (Higher Secondary)". Never write "मैं गोरखपुर जिले में रहता हूँ" as location; write "गोरखपुर, उत्तर प्रदेश".
+2. OFF-TOPIC / CASUAL CHAT / QUESTIONS ("कैसे हो", "क्या कर रहे हो", "तुम कौन हो", "समझ नहीं आया", "ये किस लिए है"):
+   - DO NOT save casual chat, greetings, or questions into the profile field!
+   - Set action = "chat_and_stay", cleanValue = "", needsClarification = true, and give a warm, friendly 1-2 sentence reply in ${langLabel} answering their question AND gently re-asking the current step question!
+3. NAVIGATION & EDIT COMMANDS (ANYTIME IN ANY STEP):
+   - Go Back ("पीछे जाओ", "पिछला सवाल", "back", "piche karo", "galat ho gaya piche chalo"): set action = "go_back", cleanValue = "", and acknowledge warmly.
+   - Go Next / Skip ("आगे बढ़ो", "नेक्स्ट", "छोड़ो", "skip", "aage chalo"): set action = "go_next", cleanValue = "".
+   - Repeat ("दोबारा बोलो", "फिर से पूछो", "repeat", "samajh nahi aaya"): set action = "repeat_question", cleanValue = "".
+   - Jump to a specific step ("नाम बदलना है", "शिक्षा वाले पर जाओ", "शहर चेंज करो", "change my skills"):
+     * If user ALSO gave the new value (e.g., "मेरा नाम गलत है आयुष गुप्ता कर दो", "पढ़ाई ग्रेजुएट कर दो"): set action = "edit_field", put the corrected field(s) in "multiFieldUpdates" (e.g. {"name": "आयुष गुप्ता"}), and confirm warmly in spokenReply!
+     * If user did NOT give the new value yet (e.g., "नाम बदलना है", "शहर गलत लिखा है"): set action = "jump_to_step", targetStep = "<matching step key>", and warmly ask them for the updated value!
+4. MULTI-FIELD EXTRACTION:
+   - If the user naturally shares multiple details in one breath (e.g., "मेरा नाम आयुष है, मैं 12वीं पास हूँ और गोरखपुर से हूँ"), put ALL extracted clean fields in "multiFieldUpdates" AND put the current step's clean value in "cleanValue", with action = "save_and_next"!
+5. INTRO STEP ("intro"):
+   - If user agrees ("हाँ", "जी", "चलो", "शुरू करो", "yes", "ok", "haan", "theek ba"): set action = "start_affirmative".
+   - If user directly gives their name on intro (e.g., "हाँ मेरा नाम आयुष है"): set action = "start_affirmative" AND include {"name": "आयुष"} in multiFieldUpdates!
+   - If user declines ("नहीं", "अभी नहीं", "बाद में", "no"): set action = "start_negative".
+   - If user asks a question ("ये क्या है?", "कैसे हो?"): set action = "chat_and_stay" and answer warmly.
+6. READBACK REVIEW STEP ("readback"):
+   - If user confirms ("हाँ सही है", "सब ठीक है", "ओके आगे बढ़ो", "yes", "confirm", "सही बा"): set action = "confirm_submit".
+   - If user wants to change a field with new value ("नाम आयुष गुप्ता कर दो"): set action = "edit_field", multiFieldUpdates = {"name": "आयुष गुप्ता"}.
+   - If user wants to change a field without new value ("शहर गलत है", "हुनर बदलना है"): set action = "jump_to_step", targetStep = "location" (or "skills").
+   - If user says "नहीं गलत है" without saying which field: set action = "chat_and_stay" and warmly ask which detail they want to change (नाम, पढ़ाई, हुनर या शहर).
+7. SPOKEN REPLY STYLE:
+   - Keep "spokenReply" crisp, natural, friendly (1-2 short sentences, NO markdown like *, #, •) so browser TTS sounds like a real helpful human guide.
+
+Return ONLY valid JSON with NO markdown fences:
+{
+  "action": "save_and_next" | "go_back" | "go_next" | "jump_to_step" | "edit_field" | "repeat_question" | "chat_and_stay" | "confirm_submit" | "start_affirmative" | "start_negative",
+  "recognizedIntent": "string describing detected intent",
+  "cleanValue": "Clean extracted value ONLY for currentStep, or empty string if not answering currentStep",
+  "multiFieldUpdates": {},
+  "targetStep": null,
+  "confidence": 0.95,
+  "needsClarification": false,
+  "clarificationQuestion": "",
+  "acknowledgment": "Short warm 1-sentence spoken confirmation in ${langLabel}",
+  "spokenReply": "Natural spoken reply for TTS in ${langLabel}"
+}`;
+}
+
+// API Route: Smart Conversational Voice Assessment Turn (Gemini-powered)
+app.post('/api/assessment-turn', async (req: Request, res: Response) => {
+  if (!checkAiRateLimit(req, res)) return;
   try {
-    const {
-      message,
-      language = 'hi',
-      currentStep = 'general',
-      existingProfile = {},
-      stepQuestion = '',
-    } = req.body;
-    if (!message || typeof message !== 'string') {
+    const message = clampStr(req.body?.message, 800);
+    const language = clampStr(req.body?.language, 8) || 'hi';
+    const currentStep = clampStr(req.body?.currentStep, 32) || 'name';
+    const stepQuestion = clampStr(req.body?.stepQuestion, 300);
+    const existingProfile =
+      req.body?.existingProfile && typeof req.body.existingProfile === 'object' ? req.body.existingProfile : {};
+    const conversationHistory = Array.isArray(req.body?.conversationHistory)
+      ? req.body.conversationHistory.slice(-8)
+      : [];
+
+    if (!message) {
       return res.status(400).json({ error: 'Message text is required' });
     }
 
@@ -137,46 +233,129 @@ app.post('/api/extract-profile', async (req: Request, res: Response) => {
     }
 
     const ai = createAiClient();
-    const systemPrompt = `You are JeevikaAI (जीविका एआई), an empathetic and natural livelihood & skill guide for rural and semi-urban Indian youth and workers.
-The user speaks in Hindi, Bhojpuri, Hinglish, or English.
+    const prompt = buildAssessmentTurnPrompt({
+      message,
+      language,
+      currentStep,
+      stepQuestion,
+      existingProfile,
+      conversationHistory,
+    });
 
-Current Context:
-- Step Key: "${currentStep}"
-- Current Question Asked: "${stepQuestion}"
-- Preferred Language: "${language}" (hi = Hindi, bho = Bhojpuri, hin = Hinglish, en = English)
-- Current Profile Data So Far: ${JSON.stringify(existingProfile)}
-- User Just Said: "${message}"
-
-Your Task:
-1. Interpret intent and extract the clean, relevant value for this field.
-2. Standardize choice options:
-   - For 'education': Map to one of ["Below 8th class", "8th class pass", "10th pass (Secondary)", "12th pass (Higher Secondary)", "Graduate", "ITI / Diploma"].
-   - For 'workType': Map to ["Job", "Self-employment", "Either"].
-   - For 'mobility': Map to ["Nearby only (within ~10 km)", "Within my district", "Anywhere in the state"].
-3. Determine confidence (0.0 to 1.0). If the answer is completely off-topic or ambiguous, confidence should be below 0.6 and needsClarification should be true.
-4. For intro step ("intro"): If user said "haan", "ji", "yes", "shuru karein", "theek ba", recognize intent as "start_affirmative".
-5. Produce a warm, encouraging, short 1-sentence acknowledgment in the user's spoken dialect (e.g. Hindi, Bhojpuri, or English).
-6. Return ONLY a valid JSON object matching this schema without any markdown formatting around it:
-{
-  "recognizedIntent": "start_affirmative" | "start_negative" | "education" | "skills" | "interests" | "occupation" | "location" | "workType" | "mobility" | "unclear",
-  "cleanValue": "Normalized string for this field",
-  "confidence": 0.95,
-  "needsClarification": false,
-  "clarificationQuestion": "Friendly clarification if confidence is low, else empty string",
-  "acknowledgment": "Short 1-sentence natural warm acknowledgment in the user's dialect (e.g. 'Achha, baarahvi pass. Bahut badhiya!')",
-  "suggestedNextTopic": "Next field"
-}`;
-
-    const rawResult = await generateContentResilient(ai, systemPrompt, {
+    const rawResult = await generateContentResilient(ai, prompt, {
       responseMimeType: 'application/json',
       timeoutMs: 8500,
     });
     let rawText = rawResult || '{}';
-    rawText = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
-
+    rawText = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
     const parsed = JSON.parse(rawText);
+
+    const allowedKeys = new Set([
+      'name',
+      'education',
+      'skills',
+      'interests',
+      'occupation',
+      'location',
+      'workType',
+      'mobility',
+    ]);
+    const cleanMulti: Record<string, string> = {};
+    if (parsed.multiFieldUpdates && typeof parsed.multiFieldUpdates === 'object') {
+      for (const [k, v] of Object.entries(parsed.multiFieldUpdates)) {
+        if (
+          allowedKeys.has(k) &&
+          typeof v === 'string' &&
+          v.trim() &&
+          v.trim().toLowerCase() !== 'null' &&
+          v.trim().toLowerCase() !== 'undefined'
+        ) {
+          cleanMulti[k] = v.trim();
+        }
+      }
+    }
+
+    const targetStep =
+      typeof parsed.targetStep === 'string' && allowedKeys.has(parsed.targetStep) ? parsed.targetStep : null;
+
     return res.json({
       fallback: false,
+      schemaVersion: 'v2',
+      result: {
+        action: parsed.action || 'save_and_next',
+        recognizedIntent: parsed.recognizedIntent || currentStep,
+        cleanValue: typeof parsed.cleanValue === 'string' ? parsed.cleanValue.trim() : '',
+        multiFieldUpdates: Object.keys(cleanMulti).length > 0 ? cleanMulti : undefined,
+        targetStep,
+        confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.92,
+        needsClarification: Boolean(parsed.needsClarification || parsed.action === 'chat_and_stay'),
+        clarificationQuestion: parsed.clarificationQuestion || parsed.spokenReply || '',
+        acknowledgment: parsed.acknowledgment || parsed.spokenReply || '',
+        spokenReply: parsed.spokenReply || parsed.acknowledgment || parsed.clarificationQuestion || '',
+      },
+    });
+  } catch (error: any) {
+    const isRateLimit =
+      error?.message?.includes('429') ||
+      error?.message?.includes('Quota exceeded') ||
+      error?.message?.includes('RESOURCE_EXHAUSTED');
+    if (!isRateLimit) {
+      console.warn('Gemini /api/assessment-turn fallback triggered:', error?.message || 'internal');
+    }
+    return res.json({
+      fallback: true,
+      error: 'Using resilient Indic rule engine',
+    });
+  }
+});
+
+// API Route: AI Conversational Profile Extraction & Guidance (backwards-compatible v2)
+app.post('/api/extract-profile', async (req: Request, res: Response) => {
+  if (!checkAiRateLimit(req, res)) return;
+  try {
+    const message = clampStr(req.body?.message, 800);
+    const language = clampStr(req.body?.language, 8) || 'hi';
+    const currentStep = clampStr(req.body?.currentStep, 32) || 'general';
+    const existingProfile =
+      req.body?.existingProfile && typeof req.body.existingProfile === 'object' ? req.body.existingProfile : {};
+    const stepQuestion = clampStr(req.body?.stepQuestion, 300);
+    const conversationHistory = Array.isArray(req.body?.conversationHistory)
+      ? req.body.conversationHistory.slice(-8)
+      : [];
+
+    if (!message) {
+      return res.status(400).json({ error: 'Message text is required' });
+    }
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      return res.json({
+        fallback: true,
+        message: 'GEMINI_API_KEY not configured, utilizing Indic client rule-engine.',
+      });
+    }
+
+    const ai = createAiClient();
+    const prompt = buildAssessmentTurnPrompt({
+      message,
+      language,
+      currentStep,
+      stepQuestion,
+      existingProfile,
+      conversationHistory,
+    });
+
+    const rawResult = await generateContentResilient(ai, prompt, {
+      responseMimeType: 'application/json',
+      timeoutMs: 8500,
+    });
+    let rawText = rawResult || '{}';
+    rawText = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
+    const parsed = JSON.parse(rawText);
+
+    return res.json({
+      fallback: false,
+      schemaVersion: 'v2',
       result: parsed,
     });
   } catch (error: any) {
