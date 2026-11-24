@@ -10,7 +10,6 @@ import { STEPS, DEMO, LANG_CONFIG } from '../data/mockData';
 import { speechService, SpeechRecognitionResultWrapper } from '../services/speechService';
 import { splitList } from '../services/recommendationEngine';
 import { storageService } from '../services/storageService';
-import { firestoreService } from '../services/firebase';
 import { locationIntelligenceService } from '../services/locationIntelligenceService';
 import { AudioVisualizer } from './AudioVisualizer';
 
@@ -714,14 +713,8 @@ export const Assessment: React.FC<AssessmentProps> = ({
     const finalProfile = profileRef.current || answers;
     storageService.saveProfile(finalProfile);
 
-    if (!finalProfile.isDemo) {
-      try {
-        firestoreService.syncLocalProfileToFirestore(finalProfile).catch(() => {});
-      } catch {
-        // Ignore
-      }
-    }
-
+    // Registration & Firestore persistence are gated strictly inside App.tsx -> handleAssessmentComplete
+    // after verifying !isDemo and full profile assessment completion.
     onSubmit(finalProfile);
   };
 

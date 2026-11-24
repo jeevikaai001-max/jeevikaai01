@@ -65,6 +65,11 @@ export interface AppUser {
   phone?: string;
   /** true when the user was created by the offline/local fallback and has no real Firebase session */
   isLocal?: boolean;
+  /**
+   * true when mobile+PIN credentials have been staged locally and are waiting for the user
+   * to complete the full profile assessment before committing the account to Firestore.
+   */
+  isPendingRegistration?: boolean;
 }
 
 export type AdminActivityAction = 'ADD' | 'UPDATE' | 'DELETE';
@@ -157,17 +162,36 @@ export const isAdminUser = (user?: AppUser | null): boolean =>
   Boolean(user) && (user?.role === 'admin' || user?.role === 'sub_admin' || isSuperAdminEmail(user?.email));
 
 /**
- * True ONLY for genuinely registered users (mobile+PIN or verified email/Google account).
- * Anonymous guests, device fallback IDs, and demo profiles NEVER pass this check.
+ * True ONLY for genuinely committed registered users (mobile+PIN after full assessment or verified email/Google account).
+ * Anonymous guests, device fallback IDs, demo profiles, and staged/pending registrations NEVER pass this check.
  */
 export const isRegisteredUser = (user?: AppUser | null): boolean =>
   Boolean(
     user &&
     !user.isAnonymous &&
+    !user.isPendingRegistration &&
     (Boolean(user.phone) || Boolean(user.email)) &&
     !user.uid.startsWith('guest_') &&
     !user.uid.startsWith('device_user_')
   );
+
+/**
+ * Validates that a beneficiary profile represents a genuinely completed, non-demo assessment.
+ * Used as the authoritative gate before committing new registrations or saving profiles to Firestore.
+ */
+export const isFullProfileAssessmentComplete = (profile?: Partial<BeneficiaryProfile> | null): boolean => {
+  if (!profile || profile.isDemo === true) return false;
+  const name = String(profile.name || '').trim();
+  const education = String(profile.education || '').trim();
+  const skills = String(profile.skills || '').trim();
+  const location = String(profile.location || '').trim();
+  const isPlaceholderName =
+    name.length < 2 ||
+    name.toLowerCase().startsWith('user') ||
+    name.includes('नागरिक (') ||
+    name === 'Guest Beneficiary';
+  return !isPlaceholderName && education.length >= 2 && skills.length >= 2 && location.length >= 2;
+};
 
 /** Deterministic SHA-256 hash of (phone + PIN) so PINs are never stored in plaintext in Firestore */
 export async function hashPhonePin(rawPhone: string, rawPin: string): Promise<string> {
@@ -313,11 +337,21 @@ function clean<T>(value: T): T {
 }
 
 const PHONE_ACCOUNTS_KEY = 'jeevika_phone_accounts_v1';
+const PENDING_PHONE_REG_KEY = 'jeevika_pending_phone_reg_v1';
 
 interface LocalPhoneAccount {
   phone: string;
   pin: string;
   pinHash?: string;
+  name?: string;
+  uid: string;
+  createdAt: string;
+}
+
+interface PendingPhoneRegistration {
+  phone: string;
+  pin: string;
+  pinHash: string;
   name?: string;
   uid: string;
   createdAt: string;
@@ -340,9 +374,32 @@ function saveLocalPhoneAccount(account: LocalPhoneAccount) {
   } catch {}
 }
 
+function loadPendingPhoneRegistration(): PendingPhoneRegistration | null {
+  try {
+    const raw = sessionStorage.getItem(PENDING_PHONE_REG_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as PendingPhoneRegistration;
+    if (parsed && isValidIndianMobile(parsed.phone) && parsed.pin?.length === 4 && parsed.pinHash) {
+      return parsed;
+    }
+  } catch {}
+  return null;
+}
+
+function persistPendingPhoneRegistration(pending: PendingPhoneRegistration | null) {
+  try {
+    if (pending) {
+      sessionStorage.setItem(PENDING_PHONE_REG_KEY, JSON.stringify(pending));
+    } else {
+      sessionStorage.removeItem(PENDING_PHONE_REG_KEY);
+    }
+  } catch {}
+}
+
 class AuthService {
   private listeners: ((user: AppUser | null) => void)[] = [];
   private currentUser: AppUser | null = null;
+  private pendingPhoneReg: PendingPhoneRegistration | null = null;
   private auth: any = null;
   private authReady: Promise<void>;
   private resolveReady: () => void = () => {};
@@ -509,9 +566,9 @@ class AuthService {
   }
 
   /**
-   * Creates a genuinely registered account from a 10-digit mobile number + 4-digit PIN.
-   * Stores a SHA-256 pinHash in Firestore so login works reliably after logout and across devices/PWAs
-   * even when Firebase Email/Password auth is not enabled.
+   * Stages a new mobile number + 4-digit PIN registration in session memory ONLY.
+   * Does NOT create a Firebase Auth account or write to Firestore /users until the user
+   * successfully completes the full profile assessment (`finalizePendingPhoneRegistration`).
    */
   public async registerWithPhone(rawPhone: string, rawPin: string, name?: string): Promise<AppUser> {
     await this.authReady;
@@ -528,113 +585,162 @@ class AuthService {
     }
 
     const email = phoneToEmail(phone);
-    const password = pinToPassword(phone, pin);
     const pinHash = await hashPhonePin(phone, pin);
     const cleanName = name && name.trim() ? name.trim() : undefined;
     const nowIso = new Date().toISOString();
+    const stagedUid = 'user_phone_' + phone;
 
-    // 1. Try Firebase Email/Password Auth if enabled on the project (never link to a random anonymous session)
-    if (this.auth && isRealFirebaseConfigured) {
-      try {
-        const res = await createUserWithEmailAndPassword(this.auth, email, password);
-        const fbUser = res.user;
-        if (cleanName) {
-          try { await updateProfile(fbUser, { displayName: cleanName }); } catch {}
-        }
-        const user: AppUser = {
-          ...this.toAppUser(fbUser),
-          displayName: cleanName || fbUser.displayName || `नागरिक (${phone.slice(-4)})`,
-          phone,
-          isAnonymous: false,
-          role: 'beneficiary',
-        };
-        this.currentUser = user;
-        saveLocalPhoneAccount({ phone, pin, pinHash, name: user.displayName || undefined, uid: user.uid, createdAt: nowIso });
+    const pending: PendingPhoneRegistration = {
+      phone,
+      pin,
+      pinHash,
+      name: cleanName,
+      uid: stagedUid,
+      createdAt: nowIso,
+    };
+    this.pendingPhoneReg = pending;
+    persistPendingPhoneRegistration(pending);
 
-        const initialPayload = clean({
-          uid: user.uid,
-          phone,
-          email,
-          pinHash,
-          registered: true,
-          isDemo: false,
-          name: cleanName || `नागरिक (${phone.slice(-4)})`,
-          status: 'pending',
-          education: '',
-          skills: '',
-          location: '',
-          state: 'Uttar Pradesh',
-          createdAt: nowIso,
-          updatedAt: nowIso,
-          lastActive: nowIso,
-          activeNow: true
-        });
-        try {
-          localStorage.setItem(`jeevika_firestore_user_${user.uid}`, JSON.stringify(initialPayload));
-        } catch {}
-        try {
-          await setDoc(doc(getDb(), 'users', user.uid), initialPayload, { merge: true });
-        } catch (err) {
-          console.warn('Initial firestore user sync notice:', err);
-        }
-
-        this.notifyListeners();
-        return user;
-      } catch (err: any) {
-        const code: string = err?.code || '';
-        if (code === 'auth/email-already-in-use' || code === 'auth/credential-already-in-use') {
-          throw new AccountError('exists');
-        }
-        console.warn('Firebase Email/Password auth unavailable, using Firestore-backed phone account:', code || err?.message);
-      }
-    }
-
-    // 2. Deterministic Firestore-backed phone account (works reliably across web, PWA & restarts)
-    const uid = 'user_phone_' + phone;
-    const localUser: AppUser = {
-      uid,
+    const stagedUser: AppUser = {
+      uid: stagedUid,
       email,
       displayName: cleanName || `नागरिक (${phone.slice(-4)})`,
       isAnonymous: false,
       role: 'beneficiary',
       phone,
-      isLocal: true
+      isLocal: true,
+      isPendingRegistration: true,
     };
 
-    const initialPayload = clean({
-      uid,
-      phone,
-      email,
-      pinHash,
-      registered: true,
-      isDemo: false,
-      name: cleanName || `नागरिक (${phone.slice(-4)})`,
-      status: 'pending',
-      education: '',
-      skills: '',
-      location: '',
-      state: 'Uttar Pradesh',
-      createdAt: nowIso,
-      updatedAt: nowIso,
-      lastActive: nowIso,
-      activeNow: true
-    });
+    this.currentUser = stagedUser;
+    this.notifyListeners();
+    return stagedUser;
+  }
 
-    saveLocalPhoneAccount({ phone, pin, pinHash, name: localUser.displayName || undefined, uid, createdAt: nowIso });
-    try {
-      localStorage.setItem(`jeevika_firestore_user_${uid}`, JSON.stringify(initialPayload));
-    } catch {}
-    if (isRealFirebaseConfigured) {
+  public hasPendingRegistration(): boolean {
+    if (!this.pendingPhoneReg) {
+      this.pendingPhoneReg = loadPendingPhoneRegistration();
+    }
+    return Boolean(this.pendingPhoneReg);
+  }
+
+  public clearPendingRegistration(): void {
+    this.pendingPhoneReg = null;
+    persistPendingPhoneRegistration(null);
+    if (this.currentUser?.isPendingRegistration) {
+      this.currentUser = null;
+      this.notifyListeners();
+    }
+  }
+
+  /**
+   * Commits a staged mobile+PIN registration to Firebase Auth (when enabled), Firestore `/users`,
+   * and local phone accounts ONLY AFTER verifying the user completed a genuine, non-demo assessment.
+   */
+  public async finalizePendingPhoneRegistration(completedProfile: BeneficiaryProfile): Promise<AppUser | null> {
+    await this.authReady;
+
+    // Hard gate: never register demo data or incomplete assessments
+    if (!isFullProfileAssessmentComplete(completedProfile)) {
+      return null;
+    }
+
+    const pending = this.pendingPhoneReg || loadPendingPhoneRegistration();
+    if (!pending) {
+      return isRegisteredUser(this.currentUser) ? this.currentUser : null;
+    }
+
+    const { phone, pin, pinHash, createdAt } = pending;
+    const email = phoneToEmail(phone);
+    const password = pinToPassword(phone, pin);
+    const cleanName = String(completedProfile.name || pending.name || '').trim() || `नागरिक (${phone.slice(-4)})`;
+    const nowIso = new Date().toISOString();
+
+    let finalUid = pending.uid || ('user_phone_' + phone);
+    let isLocalOnly = true;
+
+    // 1. Try Firebase Email/Password Auth if enabled on the project
+    if (this.auth && isRealFirebaseConfigured) {
       try {
-        await setDoc(doc(getDb(), 'users', uid), initialPayload, { merge: true });
-      } catch (err) {
-        console.warn('Firestore registered phone account save notice:', err);
+        const res = await createUserWithEmailAndPassword(this.auth, email, password);
+        const fbUser = res.user;
+        finalUid = fbUser.uid;
+        isLocalOnly = false;
+        try {
+          await updateProfile(fbUser, { displayName: cleanName });
+        } catch {}
+      } catch (err: any) {
+        const code: string = err?.code || '';
+        if (code === 'auth/email-already-in-use' || code === 'auth/credential-already-in-use') {
+          try {
+            const signInRes = await signInWithEmailAndPassword(this.auth, email, password);
+            finalUid = signInRes.user.uid;
+            isLocalOnly = false;
+          } catch {
+            // Fall back to deterministic Firestore phone document
+          }
+        } else {
+          console.warn('Firebase Email/Password auth unavailable, committing Firestore-backed phone account:', code || err?.message);
+        }
       }
     }
 
-    this.currentUser = localUser;
+    const finalizedUser: AppUser = {
+      uid: finalUid,
+      email,
+      displayName: cleanName,
+      isAnonymous: false,
+      role: 'beneficiary',
+      phone,
+      isLocal: isLocalOnly,
+      isPendingRegistration: false,
+    };
+
+    const completedPayload = clean({
+      ...completedProfile,
+      uid: finalUid,
+      phone,
+      email,
+      pinHash,
+      name: cleanName,
+      registered: true,
+      isDemo: false,
+      status: 'completed',
+      consentSaved: true,
+      createdAt,
+      updatedAt: nowIso,
+      lastActive: nowIso,
+      activeNow: true,
+    });
+
+    // 2. Persist completed registered account locally & to Firestore in one clean commit
+    saveLocalPhoneAccount({
+      phone,
+      pin,
+      pinHash,
+      name: cleanName,
+      uid: finalUid,
+      createdAt,
+    });
+    try {
+      localStorage.setItem(`jeevika_firestore_user_${finalUid}`, JSON.stringify(completedPayload));
+    } catch {}
+
+    if (isRealFirebaseConfigured) {
+      try {
+        await setDoc(doc(getDb(), 'users', finalUid), completedPayload, { merge: true });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, `users/${finalUid}`);
+        console.warn('Firestore finalized phone registration sync notice:', err);
+      }
+    }
+
+    // 3. Clear staged pending registration and promote currentUser to genuinely registered
+    this.pendingPhoneReg = null;
+    persistPendingPhoneRegistration(null);
+    this.currentUser = finalizedUser;
     this.notifyListeners();
-    return localUser;
+    return finalizedUser;
   }
 
   /**
@@ -836,13 +942,12 @@ class AuthService {
       return;
     }
 
-    // Restore a previously created *local* (offline) user only. Real sessions come from Firebase below,
-    // and an admin role is never restored from localStorage.
+    // Restore a previously committed *local* user only (never restore pending/uncommitted registrations from localStorage).
     try {
       const saved = localStorage.getItem(LOCAL_USER_KEY);
       if (saved) {
         const parsed = JSON.parse(saved) as AppUser;
-        if (parsed && parsed.isLocal) {
+        if (parsed && parsed.isLocal && !parsed.isPendingRegistration) {
           this.currentUser = { ...parsed, role: 'beneficiary' };
         } else {
           localStorage.removeItem(LOCAL_USER_KEY);
@@ -850,14 +955,32 @@ class AuthService {
       }
     } catch (e) {}
 
+    // If a registration was staged in this active tab session and not yet completed, keep it in memory
+    if (!this.currentUser) {
+      const staged = loadPendingPhoneRegistration();
+      if (staged) {
+        this.pendingPhoneReg = staged;
+        this.currentUser = {
+          uid: staged.uid,
+          email: phoneToEmail(staged.phone),
+          displayName: staged.name || `नागरिक (${staged.phone.slice(-4)})`,
+          isAnonymous: false,
+          role: 'beneficiary',
+          phone: staged.phone,
+          isLocal: true,
+          isPendingRegistration: true,
+        };
+      }
+    }
+
     if (isRealFirebaseConfigured) {
       try {
         this.auth = getAuth(getFirebaseApp());
 
         onAuthStateChanged(this.auth, async (fbUser: FirebaseUser | null) => {
           if (fbUser) {
-            // Never let a Firebase anonymous session overwrite an already signed-in registered phone user
-            if (fbUser.isAnonymous && isRegisteredUser(this.currentUser)) {
+            // Never let a Firebase anonymous session overwrite a registered or pending-registration phone user
+            if (fbUser.isAnonymous && (isRegisteredUser(this.currentUser) || this.currentUser?.isPendingRegistration)) {
               this.resolveReady();
               return;
             }
@@ -887,7 +1010,7 @@ class AuthService {
 
   private notifyListeners() {
     try {
-      if (this.currentUser?.isLocal) {
+      if (this.currentUser?.isLocal && !this.currentUser?.isPendingRegistration) {
         localStorage.setItem(LOCAL_USER_KEY, JSON.stringify(this.currentUser));
       } else {
         localStorage.removeItem(LOCAL_USER_KEY);
@@ -1048,6 +1171,8 @@ class AuthService {
   }
 
   public async logout(): Promise<void> {
+    this.pendingPhoneReg = null;
+    persistPendingPhoneRegistration(null);
     if (isRealFirebaseConfigured && this.auth) {
       await fbSignOut(this.auth);
     }
@@ -1056,6 +1181,8 @@ class AuthService {
   }
 
   public async deleteAccount(): Promise<void> {
+    this.pendingPhoneReg = null;
+    persistPendingPhoneRegistration(null);
     if (isRealFirebaseConfigured && this.auth && this.auth.currentUser) {
       await this.auth.currentUser.delete();
     }
@@ -1245,7 +1372,13 @@ export const firestoreService = {
    */
   async syncLocalProfileToFirestore(profile: BeneficiaryProfile): Promise<string> {
     const currentUser = authService.getCurrentUser();
-    if (!isRegisteredUser(currentUser) || !currentUser || profile?.isDemo === true) {
+    if (
+      !isRegisteredUser(currentUser) ||
+      !currentUser ||
+      currentUser.isPendingRegistration ||
+      profile?.isDemo === true ||
+      !isFullProfileAssessmentComplete(profile)
+    ) {
       return '';
     }
     const uid = currentUser.uid;
@@ -1264,18 +1397,20 @@ export const firestoreService = {
     consentSaved: boolean = true,
     cloudAllowed: boolean = true
   ) {
-    // Hard guard: never write demo, guest, or anonymous device profiles to Firestore /users
-    if (!uid || profile?.isDemo === true || uid.startsWith('guest_') || uid.startsWith('device_user_')) {
+    // Hard guard: never write demo, guest, pending-registration, incomplete, or anonymous device profiles to Firestore /users
+    const activeUser = authService.getCurrentUser();
+    if (
+      !uid ||
+      profile?.isDemo === true ||
+      uid.startsWith('guest_') ||
+      uid.startsWith('device_user_') ||
+      activeUser?.isPendingRegistration === true ||
+      !isFullProfileAssessmentComplete(profile)
+    ) {
       return false;
     }
 
-    const isComplete = Boolean(
-      profile.name && profile.name.trim() && !profile.name.toLowerCase().startsWith('user') &&
-      profile.skills && profile.skills.trim() &&
-      profile.location && profile.location.trim() &&
-      profile.education && profile.education.trim()
-    );
-    const phone = normalizePhone(profile.phone || authService.getCurrentUser()?.phone || '') || undefined;
+    const phone = normalizePhone(profile.phone || activeUser?.phone || '') || undefined;
 
     const payload = clean({
       ...profile,
@@ -1283,7 +1418,7 @@ export const firestoreService = {
       phone,
       isDemo: false,
       registered: true,
-      status: isComplete ? 'completed' : 'pending',
+      status: 'completed',
       consentSaved,
       updatedAt: new Date().toISOString(),
       lastActive: new Date().toISOString(),

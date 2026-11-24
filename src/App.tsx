@@ -14,6 +14,7 @@ import {
   AppUser,
   firestoreService,
   isRegisteredUser,
+  isFullProfileAssessmentComplete,
   normalizePhone,
 } from './services/firebase';
 import {
@@ -382,7 +383,7 @@ export function App() {
     if (
       currentUser &&
       !currentUser.isAnonymous &&
-      (!profile || !profile.skills || !profile.education || profile.status === 'pending') &&
+      (!profile || profile.isDemo === true || !isFullProfileAssessmentComplete(profile) || profile.status === 'pending') &&
       ['dashboard', 'opportunities', 'training', 'saved', 'skill-gap'].includes(targetView)
     ) {
       notify(
@@ -456,20 +457,20 @@ export function App() {
       locationIntelligenceService.setActiveLocation(targetLoc);
     }
 
-    const activeRegisteredUser = isRegisteredUser(currentUser)
-      ? currentUser
-      : isRegisteredUser(authService.getCurrentUser())
-      ? authService.getCurrentUser()
-      : null;
-    const isDemoOrGuestRun = Boolean(newProfile.isDemo) || !activeRegisteredUser;
+    // Strict isDemo check: loading demo data or previewing NEVER finalizes an account or writes to Firestore
+    const isDemoRun = newProfile.isDemo === true;
+    const liveUser = currentUser || authService.getCurrentUser();
+    const hasPendingReg = !isDemoRun && (Boolean(liveUser?.isPendingRegistration) || authService.hasPendingRegistration());
+    const alreadyRegisteredUser = !isDemoRun && isRegisteredUser(liveUser) ? liveUser : null;
+    const isDemoOrGuestRun = isDemoRun || (!alreadyRegisteredUser && !hasPendingReg);
 
     const enrichedInputProfile: BeneficiaryProfile = {
       ...newProfile,
       location: targetLoc,
       isDemo: isDemoOrGuestRun,
-      ...(activeRegisteredUser && !isDemoOrGuestRun
+      ...(!isDemoOrGuestRun && (alreadyRegisteredUser || liveUser)
         ? {
-            phone: activeRegisteredUser.phone || newProfile.phone,
+            phone: (alreadyRegisteredUser || liveUser)?.phone || newProfile.phone,
             status: 'completed' as const,
           }
         : {}),
@@ -482,12 +483,27 @@ export function App() {
         : {}),
     };
 
+    const hasFullAssessment = !isDemoOrGuestRun && isFullProfileAssessmentComplete(enrichedInputProfile);
+
     setProfile(enrichedInputProfile);
     await storageService.saveProfile(enrichedInputProfile);
 
-    // Immediately persist completed profile to Firestore ONLY for genuinely registered users
-    if (activeRegisteredUser && !isDemoOrGuestRun) {
-      firestoreService.saveUserProfile(activeRegisteredUser.uid, enrichedInputProfile, true, true).catch(() => {});
+    // Commit registration & profile to Firestore ONLY after full, non-demo assessment completion
+    let committedUser: AppUser | null = alreadyRegisteredUser;
+    if (hasFullAssessment) {
+      if (hasPendingReg) {
+        try {
+          const finalized = await authService.finalizePendingPhoneRegistration(enrichedInputProfile);
+          if (finalized) {
+            committedUser = finalized;
+            setCurrentUser(finalized);
+          }
+        } catch (err) {
+          console.warn('Could not finalize pending registration after assessment:', err);
+        }
+      } else if (committedUser) {
+        firestoreService.saveUserProfile(committedUser.uid, enrichedInputProfile, true, true).catch(() => {});
+      }
     }
 
     try {
@@ -531,10 +547,10 @@ export function App() {
       }
     } catch {}
 
-    // Persist final AI-enriched profile to Firestore ONLY for genuinely registered users
-    if (activeRegisteredUser && !isDemoOrGuestRun) {
+    // Persist final AI-enriched profile to Firestore ONLY for genuinely registered users with a completed, non-demo profile
+    if (committedUser && isRegisteredUser(committedUser) && hasFullAssessment && analyzedProfile.isDemo !== true) {
       try {
-        await firestoreService.saveUserProfile(activeRegisteredUser.uid, analyzedProfile, true, true);
+        await firestoreService.saveUserProfile(committedUser.uid, analyzedProfile, true, true);
       } catch {}
     }
 
@@ -917,7 +933,11 @@ export function App() {
     try { localStorage.setItem('jeevika_lang', lang); } catch {}
     setShowVoiceStartModal(false);
 
-    const isLogged = (currentUser && !currentUser.isAnonymous) || Boolean(profile);
+    // Demo preview profiles NEVER count as logged-in registered users
+    const isLogged =
+      isRegisteredUser(currentUser) ||
+      Boolean(currentUser?.isPendingRegistration) ||
+      Boolean(profile && !profile.isDemo);
     if (!isLogged) {
       setAccountMode('create');
     } else {
@@ -932,8 +952,10 @@ export function App() {
     storageService.clearProfile();
     notify(
       currentLang === 'bho'
-        ? `खाता बन गइल! अब आपन हुनर के मूल्यांकन शुरू करीं।`
-        : `खाता बन गया! अब अपने हुनर का मूल्यांकन शुरू करें।`
+        ? `मोबाइल अउर PIN तैयार बा! खाता सेव करे खातिर अब आपन हुनर व प्रोफ़ाइल पूरा करीं।`
+        : currentLang === 'en'
+        ? `Mobile & PIN ready! Complete your full profile assessment to save your account.`
+        : `मोबाइल व PIN तैयार है! खाता सेव करने के लिए अब अपना हुनर व प्रोफ़ाइल मूल्यांकन पूरा करें।`
     );
     setAccountMode(null);
     setAutoStartAssessment(true);
@@ -956,36 +978,23 @@ export function App() {
     try {
       // 1. Fetch profile from Firestore by UID, and also by phone number if needed
       let saved = await firestoreService.getUserProfile(user.uid);
-      if (
-        (!saved || !saved.skills || !saved.education || saved.status === 'pending') &&
-        userPhone
-      ) {
+      if ((!saved || !isFullProfileAssessmentComplete(saved) || saved.status === 'pending') && userPhone) {
         const byPhone = await firestoreService.getUserProfileByPhone(userPhone);
-        if (byPhone?.profile) {
+        if (byPhone?.profile && byPhone.profile.isDemo !== true) {
           saved = byPhone.profile;
         }
       }
 
-      // 2. Only fall back to localStorage profile if it belongs to this exact registered user (NEVER demo!)
-      if (!saved || !saved.skills || !saved.education || saved.status === 'pending') {
+      // 2. Only fall back to localStorage if it belongs to this exact registered user, is NOT demo, and is fully completed
+      if (!saved || !isFullProfileAssessmentComplete(saved) || saved.status === 'pending') {
         const localProf = storageService.loadProfile();
-        if (isMatchingLocalProfile(localProf) && localProf && localProf.skills && localProf.education) {
-          saved = localProf;
-          await firestoreService.saveUserProfile(user.uid, localProf, true, true);
+        if (isMatchingLocalProfile(localProf) && isFullProfileAssessmentComplete(localProf) && localProf) {
+          saved = { ...localProf, isDemo: false, status: 'completed' };
+          await firestoreService.saveUserProfile(user.uid, saved, true, true);
         }
       }
 
-      const isComplete = Boolean(
-        saved &&
-        saved.isDemo !== true &&
-        saved.name &&
-        !saved.name.toLowerCase().startsWith('user') &&
-        !saved.name.includes('नागरिक (') &&
-        saved.skills &&
-        String(saved.skills).trim().length > 2 &&
-        saved.education &&
-        String(saved.education).trim().length > 1
-      );
+      const isComplete = Boolean(saved && saved.isDemo !== true && isFullProfileAssessmentComplete(saved));
 
       if (isComplete && saved) {
         const { consentSaved: _c, updatedAt: _u, pinHash: _p, ...restored } = saved as any;
@@ -993,6 +1002,7 @@ export function App() {
           ...(restored as BeneficiaryProfile),
           phone: userPhone || (restored as BeneficiaryProfile).phone,
           isDemo: false,
+          status: 'completed',
         };
         setProfile(restoredProfile);
         await storageService.saveProfile(restoredProfile);
@@ -1023,8 +1033,8 @@ export function App() {
     } catch (err) {
       console.warn('Could not load saved profile after login:', err);
       const localProf = storageService.loadProfile();
-      if (isMatchingLocalProfile(localProf) && localProf && localProf.skills && localProf.education) {
-        setProfile({ ...localProf, isDemo: false });
+      if (isMatchingLocalProfile(localProf) && isFullProfileAssessmentComplete(localProf) && localProf) {
+        setProfile({ ...localProf, isDemo: false, status: 'completed' });
         navigateTo('dashboard');
         return true;
       }
@@ -1245,8 +1255,12 @@ export function App() {
             currentProfile={activeProfile}
             go={navigateTo}
             onRestoreProfile={(p) => {
-              setProfile(p);
-              storageService.saveProfile(p);
+              const safeRestored: BeneficiaryProfile = {
+                ...p,
+                isDemo: Boolean(p.isDemo) || !isRegisteredUser(currentUser),
+              };
+              setProfile(safeRestored);
+              storageService.saveProfile(safeRestored);
               notify('Restored profile as active.');
               navigateTo('dashboard');
             }}
