@@ -1549,11 +1549,30 @@ export const subAdminService = {
 
 // ============================================================================
 // Cross-Device Push Notification Broadcasts & Web Push Subscription Registry
+// Powered by the app's Express /api/push/* engine (with local offline fallback)
+// so broadcasts and subscriptions work cleanly across web & installed PWAs.
 // ============================================================================
 const LOCAL_NOTIF_QUEUE_KEY = 'jeevika_push_queue';
+const NOTIF_UPDATED_EVENT = 'jeevika-notifications-updated';
+const SUBS_UPDATED_EVENT = 'jeevika-push-subs-updated';
+
+function readLocalNotifs(): PushNotificationRecord[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LOCAL_NOTIF_QUEUE_KEY) || '[]');
+    return Array.isArray(raw) ? raw : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeLocalNotifs(items: PushNotificationRecord[]) {
+  try {
+    localStorage.setItem(LOCAL_NOTIF_QUEUE_KEY, JSON.stringify(items.slice(0, 50)));
+  } catch {}
+}
 
 export const notificationService = {
-  /** Publishes a broadcast or targeted citizen notification to Firestore /notifications/{id} */
+  /** Publishes a broadcast or targeted citizen notification to the backend push feed */
   async publishNotification(input: {
     target: 'all' | 'specific';
     targetUserId?: string;
@@ -1582,143 +1601,188 @@ export const notificationService = {
       timestampMs: nowMs,
     };
 
-    try {
-      const existing = JSON.parse(localStorage.getItem(LOCAL_NOTIF_QUEUE_KEY) || '[]');
-      const next = [record, ...(Array.isArray(existing) ? existing : [])].slice(0, 50);
-      localStorage.setItem(LOCAL_NOTIF_QUEUE_KEY, JSON.stringify(next));
-    } catch {}
+    const nextLocal = [record, ...readLocalNotifs().filter((n) => n.id !== id)].slice(0, 50);
+    writeLocalNotifs(nextLocal);
 
     let syncedToCloud = false;
-    if (isRealFirebaseConfigured) {
-      try {
-        await setDoc(doc(getDb(), 'notifications', id), clean(record));
+    try {
+      const res = await fetch('/api/push/notifications', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(clean(record)),
+      });
+      if (res.ok) {
         syncedToCloud = true;
-      } catch (err) {
-        handleFirestoreError(err, OperationType.CREATE, `notifications/${id}`);
       }
+    } catch {}
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent(NOTIF_UPDATED_EVENT));
     }
 
     return { record, syncedToCloud };
   },
 
-  /** Real-time subscription to all broadcast and targeted notifications */
+  /** Live subscription to all broadcast and targeted notifications across web & PWA */
   subscribeNotifications(
     onUpdate: (items: PushNotificationRecord[]) => void,
-    onError?: (error: any) => void
+    _onError?: (error: any) => void
   ): () => void {
-    if (!isRealFirebaseConfigured) {
+    let active = true;
+
+    const fetchAndEmit = async () => {
+      if (!active) return;
       try {
-        const local = JSON.parse(localStorage.getItem(LOCAL_NOTIF_QUEUE_KEY) || '[]');
-        onUpdate(Array.isArray(local) ? local : []);
-      } catch {
-        onUpdate([]);
-      }
-      return () => {};
-    }
-
-    try {
-      return onSnapshot(
-        collection(getDb(), 'notifications'),
-        (snapshot) => {
-          const items = snapshot.docs
-            .map((d) => {
-              const data = d.data() as Partial<PushNotificationRecord>;
-              const ts =
-                typeof data.timestampMs === 'number'
-                  ? data.timestampMs
-                  : data.createdAt
-                  ? new Date(data.createdAt).getTime()
-                  : 0;
-              return {
-                id: data.id || d.id,
-                target: data.target === 'specific' ? 'specific' : 'all',
-                targetUserId: data.targetUserId,
-                targetPhone: data.targetPhone,
-                targetName: data.targetName,
-                title: data.title || 'JeevikaAI Update',
-                body: data.body || '',
-                url: data.url || '/',
-                sentBy: data.sentBy,
-                pushDeliveredCount: data.pushDeliveredCount ?? 0,
-                createdAt: data.createdAt || new Date(ts || Date.now()).toISOString(),
-                timestampMs: ts,
-              } as PushNotificationRecord;
-            })
-            .sort((a, b) => b.timestampMs - a.timestampMs);
-          onUpdate(items);
-        },
-        (error) => {
-          handleFirestoreError(error, OperationType.LIST, 'notifications');
-          if (onError) onError(error);
+        const res = await fetch('/api/push/notifications', { cache: 'no-store' });
+        if (res.ok) {
+          const data = await res.json();
+          const serverItems: PushNotificationRecord[] = Array.isArray(data?.notifications)
+            ? data.notifications
+            : [];
+          if (serverItems.length > 0) {
+            writeLocalNotifs(serverItems);
+          }
+          if (active) {
+            onUpdate(serverItems.length > 0 ? serverItems : readLocalNotifs());
+          }
+          return;
         }
-      );
-    } catch (err) {
-      handleFirestoreError(err, OperationType.LIST, 'notifications');
-      if (onError) onError(err);
-      return () => {};
+      } catch {}
+      if (active) {
+        onUpdate(readLocalNotifs());
+      }
+    };
+
+    fetchAndEmit();
+
+    const intervalId =
+      typeof window !== 'undefined'
+        ? window.setInterval(() => {
+            if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+              fetchAndEmit();
+            }
+          }, 12000)
+        : null;
+
+    const handleRefresh = () => {
+      fetchAndEmit();
+    };
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('focus', handleRefresh);
+      window.addEventListener(NOTIF_UPDATED_EVENT, handleRefresh);
+      document.addEventListener('visibilitychange', handleRefresh);
     }
+
+    return () => {
+      active = false;
+      if (intervalId !== null && typeof window !== 'undefined') {
+        window.clearInterval(intervalId);
+      }
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('focus', handleRefresh);
+        window.removeEventListener(NOTIF_UPDATED_EVENT, handleRefresh);
+        document.removeEventListener('visibilitychange', handleRefresh);
+      }
+    };
   },
 
-  /** Saves or updates a citizen device Web Push subscription in Firestore /push_subscriptions/{id} */
+  /** Saves or updates a citizen device Web Push subscription on the backend push registry */
   async savePushSubscription(docData: PushSubscriptionDoc): Promise<boolean> {
-    if (!isRealFirebaseConfigured || !docData?.id || !docData?.endpoint) return false;
+    if (!docData?.id || !docData?.endpoint) return false;
     try {
-      await setDoc(doc(getDb(), 'push_subscriptions', docData.id), clean(docData), { merge: true });
-      return true;
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, `push_subscriptions/${docData.id}`);
-      return false;
-    }
+      const res = await fetch('/api/push/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(clean(docData)),
+      });
+      if (res.ok) {
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent(SUBS_UPDATED_EVENT));
+        }
+        return true;
+      }
+    } catch {}
+    return false;
   },
 
-  /** Lists all stored Web Push subscriptions from Firestore */
+  /** Lists all stored Web Push subscriptions from the backend push registry */
   async getPushSubscriptions(): Promise<PushSubscriptionDoc[]> {
-    if (!isRealFirebaseConfigured) return [];
     try {
-      const snap = await getDocs(collection(getDb(), 'push_subscriptions'));
-      return snap.docs
-        .map((d) => ({ id: d.id, ...(d.data() as Omit<PushSubscriptionDoc, 'id'>) }) as PushSubscriptionDoc)
-        .filter((s) => Boolean(s.endpoint && s.subscription?.keys?.p256dh));
-    } catch (err) {
-      handleFirestoreError(err, OperationType.LIST, 'push_subscriptions');
+      const res = await fetch('/api/push/subscribers', { cache: 'no-store' });
+      if (!res.ok) return [];
+      const data = await res.json();
+      const list = Array.isArray(data?.subscribers) ? data.subscribers : [];
+      return list.map((s: any) => ({
+        id: String(s.id || ''),
+        endpoint: String(s.endpoint || s.id || ''),
+        subscription: s.subscription || {
+          endpoint: String(s.endpoint || ''),
+          keys: { p256dh: '', auth: '' },
+        },
+        uid: s.uid,
+        phone: s.phone,
+        name: s.name,
+        location: s.location,
+        isStandalone: Boolean(s.isStandalone),
+        updatedAt: s.updatedAt || new Date().toISOString(),
+      })) as PushSubscriptionDoc[];
+    } catch {
       return [];
     }
   },
 
-  /** Real-time subscription to registered Web Push devices for AdminCMSView */
+  /** Live subscription to registered Web Push devices for AdminCMSView */
   subscribePushSubscriptions(
     onUpdate: (items: PushSubscriptionDoc[]) => void,
-    onError?: (error: any) => void
+    _onError?: (error: any) => void
   ): () => void {
-    if (!isRealFirebaseConfigured) {
-      onUpdate([]);
-      return () => {};
+    let active = true;
+
+    const fetchAndEmit = async () => {
+      const subs = await this.getPushSubscriptions();
+      if (active) onUpdate(subs);
+    };
+
+    fetchAndEmit();
+
+    const intervalId =
+      typeof window !== 'undefined'
+        ? window.setInterval(() => {
+            if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+              fetchAndEmit();
+            }
+          }, 15000)
+        : null;
+
+    const handleRefresh = () => {
+      fetchAndEmit();
+    };
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('focus', handleRefresh);
+      window.addEventListener(SUBS_UPDATED_EVENT, handleRefresh);
     }
-    try {
-      return onSnapshot(
-        collection(getDb(), 'push_subscriptions'),
-        (snap) => {
-          const items = snap.docs
-            .map((d) => ({ id: d.id, ...(d.data() as Omit<PushSubscriptionDoc, 'id'>) }) as PushSubscriptionDoc)
-            .filter((s) => Boolean(s.endpoint && s.subscription?.keys?.p256dh));
-          onUpdate(items);
-        },
-        (error) => {
-          handleFirestoreError(error, OperationType.LIST, 'push_subscriptions');
-          if (onError) onError(error);
-        }
-      );
-    } catch (err) {
-      handleFirestoreError(err, OperationType.LIST, 'push_subscriptions');
-      if (onError) onError(err);
-      return () => {};
-    }
+
+    return () => {
+      active = false;
+      if (intervalId !== null && typeof window !== 'undefined') {
+        window.clearInterval(intervalId);
+      }
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('focus', handleRefresh);
+        window.removeEventListener(SUBS_UPDATED_EVENT, handleRefresh);
+      }
+    };
   },
 
   async removePushSubscription(id: string): Promise<void> {
-    if (!isRealFirebaseConfigured || !id) return;
+    if (!id) return;
     try {
-      await deleteDoc(doc(getDb(), 'push_subscriptions', id));
+      await fetch(`/api/push/subscribers/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent(SUBS_UPDATED_EVENT));
+      }
     } catch {}
   },
 };

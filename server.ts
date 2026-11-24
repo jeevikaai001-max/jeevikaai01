@@ -942,6 +942,7 @@ app.delete('/api/showcase/:id', (req: Request, res: Response) => {
 // ============================================================================
 const VAPID_KEYS_FILE = path.join(os.tmpdir(), 'jeevika_vapid_keys_v1.json');
 const PUSH_SUBS_FILE = path.join(os.tmpdir(), 'jeevika_push_subscriptions_v1.json');
+const PUSH_NOTIFS_FILE = path.join(os.tmpdir(), 'jeevika_push_notifications_v1.json');
 
 interface StoredPushSub {
   id: string;
@@ -953,6 +954,21 @@ interface StoredPushSub {
   location?: string;
   isStandalone?: boolean;
   updatedAt: string;
+}
+
+interface StoredPushNotification {
+  id: string;
+  target: 'all' | 'specific';
+  targetUserId?: string;
+  targetPhone?: string;
+  targetName?: string;
+  title: string;
+  body: string;
+  url?: string;
+  sentBy?: string;
+  pushDeliveredCount?: number;
+  createdAt: string;
+  timestampMs: number;
 }
 
 function getOrCreateVapidKeys(): { publicKey: string; privateKey: string; subject: string } {
@@ -1003,6 +1019,22 @@ function writePushSubs(subs: StoredPushSub[]) {
   } catch {}
 }
 
+function readPushNotifs(): StoredPushNotification[] {
+  try {
+    if (fs.existsSync(PUSH_NOTIFS_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(PUSH_NOTIFS_FILE, 'utf8'));
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {}
+  return [];
+}
+
+function writePushNotifs(notifs: StoredPushNotification[]) {
+  try {
+    fs.writeFileSync(PUSH_NOTIFS_FILE, JSON.stringify(notifs.slice(0, 100), null, 2), 'utf8');
+  } catch {}
+}
+
 function normalizePhoneServer(raw?: string): string {
   return String(raw || '').replace(/\D/g, '').slice(-10);
 }
@@ -1014,12 +1046,46 @@ app.get('/api/push/vapid-public-key', (_req: Request, res: Response) => {
   });
 });
 
+app.get('/api/push/notifications', (_req: Request, res: Response) => {
+  const notifications = readPushNotifs().sort((a, b) => (b.timestampMs || 0) - (a.timestampMs || 0));
+  return res.json({ count: notifications.length, notifications });
+});
+
+app.post('/api/push/notifications', (req: Request, res: Response) => {
+  const body = req.body || {};
+  const title = clampStr(body.title, 200);
+  const message = clampStr(body.body, 1000);
+  if (!title || !message) {
+    return res.status(400).json({ error: 'title and body are required' });
+  }
+  const nowMs = typeof body.timestampMs === 'number' && body.timestampMs > 0 ? body.timestampMs : Date.now();
+  const id = clampStr(body.id, 128) || `notif_${nowMs}_${Math.random().toString(36).slice(2, 7)}`;
+  const record: StoredPushNotification = {
+    id,
+    target: body.target === 'specific' ? 'specific' : 'all',
+    targetUserId: clampStr(body.targetUserId, 128) || undefined,
+    targetPhone: normalizePhoneServer(body.targetPhone) || undefined,
+    targetName: clampStr(body.targetName, 150) || undefined,
+    title,
+    body: message,
+    url: clampStr(body.url, 300) || '/',
+    sentBy: clampStr(body.sentBy, 150) || 'Admin',
+    pushDeliveredCount: typeof body.pushDeliveredCount === 'number' ? body.pushDeliveredCount : 0,
+    createdAt: clampStr(body.createdAt, 64) || new Date(nowMs).toISOString(),
+    timestampMs: nowMs,
+  };
+  const next = [record, ...readPushNotifs().filter((n) => n.id !== id)].slice(0, 100);
+  writePushNotifs(next);
+  return res.json({ ok: true, record });
+});
+
 app.get('/api/push/subscribers', (_req: Request, res: Response) => {
   const subs = readPushSubs();
   return res.json({
     count: subs.length,
     subscribers: subs.map((s) => ({
       id: s.id,
+      endpoint: s.endpoint,
       uid: s.uid,
       phone: s.phone,
       name: s.name,
@@ -1028,6 +1094,14 @@ app.get('/api/push/subscribers', (_req: Request, res: Response) => {
       updatedAt: s.updatedAt,
     })),
   });
+});
+
+app.delete('/api/push/subscribers/:id', (req: Request, res: Response) => {
+  const id = clampStr(req.params.id, 128);
+  if (!id) return res.status(400).json({ error: 'id is required' });
+  const remaining = readPushSubs().filter((s) => s.id !== id);
+  writePushSubs(remaining);
+  return res.json({ ok: true, remaining: remaining.length });
 });
 
 app.post('/api/push/subscribe', (req: Request, res: Response) => {

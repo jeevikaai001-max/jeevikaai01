@@ -213,10 +213,17 @@ export function useAppPermissions(options: {
     (p) => p === 'prompt' || p === 'denied'
   ).length;
 
+  const hasPromptablePermissions = [
+    permissions.notifications,
+    permissions.microphone,
+    permissions.geolocation,
+  ].some((p) => p === 'prompt');
+
   return {
     permissions,
     allGranted,
     pendingCount,
+    hasPromptablePermissions,
     isRequestingKey,
     refreshPermissions,
     requestNotification,
@@ -241,7 +248,6 @@ interface PermissionsPromptModalProps {
 
 export const PermissionsPromptModal: React.FC<PermissionsPromptModalProps> = ({
   isOpen,
-  isStandalone,
   currentLang,
   permissions,
   isRequestingKey,
@@ -256,247 +262,110 @@ export const PermissionsPromptModal: React.FC<PermissionsPromptModalProps> = ({
   const isEn = currentLang === 'en';
   const isBho = currentLang === 'bho';
 
-  const items: Array<{
+  const allItems: Array<{
     key: keyof AppPermissionsState;
     icon: string;
-    title: string;
-    desc: string;
+    label: string;
     status: PermissionStatus;
     onAllow: () => Promise<PermissionStatus>;
   }> = [
     {
       key: 'notifications',
       icon: 'bell',
-      title: isEn
-        ? 'Push Notifications'
-        : isBho
-        ? 'पुश नोटिफिकेशन (सूचना)'
-        : 'पुश नोटिफिकेशन (Push Alerts)',
-      desc: isEn
-        ? 'Get instant job openings, scheme alerts & admin reminders even when the app is closed.'
-        : isBho
-        ? 'नया नौकरी, सरकारी योजना अउर जरूरी सूचना तुरंत मोबाइल पर पाईं।'
-        : 'नए रोजगार अवसर, सरकारी योजनाएं और जरूरी अलर्ट बैकग्राउंड में तुरंत पाएं।',
+      label: isEn ? 'Notifications' : 'नोटिफिकेशन',
       status: permissions.notifications,
       onAllow: onRequestNotification,
     },
     {
       key: 'microphone',
       icon: 'mic',
-      title: isEn
-        ? 'Microphone (Voice Assistant)'
-        : isBho
-        ? 'माइक्रोफ़ोन (आवाज़ सहायक)'
-        : 'माइक्रोफ़ोन (वॉइस असिस्टेंट)',
-      desc: isEn
-        ? 'Speak in Hindi, Bhojpuri, or English for voice profile setup and hands-free guidance.'
-        : isBho
-        ? 'हिंदी या भोजपुरी में बोलके आपन प्रोफ़ाइल बनाईं अउर मदद लीं।'
-        : 'हिंदी, भोजपुरी या अंग्रेज़ी में बोलकर प्रोफ़ाइल भरें और वॉइस सहायक का उपयोग करें।',
+      label: isEn ? 'Microphone' : 'माइक्रोफ़ोन',
       status: permissions.microphone,
       onAllow: onRequestMicrophone,
     },
     {
       key: 'geolocation',
       icon: 'pin',
-      title: isEn
-        ? 'GPS Location'
-        : isBho
-        ? 'जीपीएस लोकेशन (जगह)'
-        : 'जीपीएस लोकेशन (GPS Location)',
-      desc: isEn
-        ? 'Find verified jobs, training centers, and government schemes in your exact area.'
-        : isBho
-        ? 'रउआ इलाका के सटीक नौकरी, ट्रेनिंग केंद्र अउर योजना खोजे खातिर।'
-        : 'आपके सटीक क्षेत्र के नज़दीकी रोजगार, प्रशिक्षण केंद्र और योजनाएं खोजने के लिए।',
+      label: isEn ? 'Location' : 'लोकेशन',
       status: permissions.geolocation,
       onAllow: onRequestGeolocation,
     },
   ];
 
-  const anyBlocked = items.some((i) => i.status === 'denied');
-  const allDone = items.every((i) => i.status === 'granted' || i.status === 'unsupported');
-
-  const statusBadge = (st: PermissionStatus) => {
-    if (st === 'granted') {
-      return (
-        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#E9F7F4] text-[#1E6058] border border-[#287D73]/25 text-[11px] font-extrabold">
-          <Icon name="check" size={12} />
-          {isEn ? 'Allowed' : 'अनुमति मिली'}
-        </span>
-      );
-    }
-    if (st === 'denied') {
-      return (
-        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#FEF2F2] text-[#9E2A2B] border border-[#9E2A2B]/25 text-[11px] font-extrabold">
-          {isEn ? 'Blocked' : 'ब्लॉक है'}
-        </span>
-      );
-    }
-    if (st === 'unsupported') {
-      return (
-        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-100 text-slate-500 text-[11px] font-bold">
-          {isEn ? 'Unavailable' : 'उपलब्ध नहीं'}
-        </span>
-      );
-    }
-    return null;
-  };
+  const promptableItems = allItems.filter((i) => i.status === 'prompt');
+  if (promptableItems.length === 0) return null;
 
   return (
     <div
-      className="fixed inset-0 z-[90] bg-[#17365D]/70 backdrop-blur-sm flex items-center justify-center p-4"
+      className="fixed inset-0 z-[90] bg-black/50 backdrop-blur-[2px] flex items-center justify-center p-4"
       role="dialog"
       aria-modal="true"
       aria-labelledby="permissions-modal-title"
     >
-      <div className="bg-white w-full max-w-lg rounded-2xl border border-[#DCE3EA] shadow-2xl overflow-hidden">
-        <div className="gov-tricolor-line" />
-        <div className="p-5 sm:p-6 space-y-5">
-          {/* Header */}
-          <div className="flex items-start justify-between gap-3">
-            <div className="flex items-start gap-3">
-              <div className="w-11 h-11 rounded-xl bg-[#17365D] text-white flex items-center justify-center flex-none">
-                <Icon name="shieldCheck" size={22} className="text-[#F4B966]" />
-              </div>
-              <div>
-                <div className="text-[11px] font-extrabold uppercase tracking-wider text-[#287D73]">
-                  {isStandalone
-                    ? isEn
-                      ? 'JeevikaAI App Setup'
-                      : 'JeevikaAI ऐप सेटअप'
-                    : isEn
-                    ? 'Required App Permissions'
-                    : 'आवश्यक ऐप अनुमतियाँ'}
-                </div>
-                <h2
-                  id="permissions-modal-title"
-                  className="text-lg sm:text-xl font-extrabold text-[#17365D] font-['Bricolage_Grotesque'] leading-snug"
-                >
-                  {isEn
-                    ? 'Enable Notifications, Mic & Location'
-                    : isBho
-                    ? 'सूचना, माइक अउर लोकेशन के अनुमति दीं'
-                    : 'नोटिफिकेशन, माइक और लोकेशन की अनुमति दें'}
-                </h2>
-                <p className="text-xs text-[#5F6B76] mt-0.5">
-                  {isEn
-                    ? 'Allow these permissions so voice guidance, background alerts, and local GPS jobs work smoothly.'
-                    : 'वॉइस असिस्टेंट, बैकग्राउंड नोटिफिकेशन और सटीक GPS अवसरों के लिए ये अनुमतियाँ चालू करें।'}
-                </p>
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={onCancel}
-              aria-label="Close permissions dialog"
-              className="w-9 h-9 rounded-lg border border-[#DCE3EA] text-[#5F6B76] hover:bg-[#F7F9FC] flex items-center justify-center flex-none"
-            >
-              ✕
-            </button>
+      <div className="bg-white w-full max-w-[330px] rounded-2xl border border-[#DCE3EA] shadow-2xl overflow-hidden">
+        <div className="p-5 text-center space-y-4">
+          <div className="w-11 h-11 mx-auto rounded-full bg-[#EBF3FB] text-[#245A91] flex items-center justify-center">
+            <Icon name="shieldCheck" size={22} />
           </div>
 
-          {/* Permission Cards */}
-          <div className="space-y-3">
-            {items.map((item) => (
+          <h2
+            id="permissions-modal-title"
+            className="text-base font-extrabold text-[#17365D] leading-snug"
+          >
+            {isEn
+              ? 'Allow JeevikaAI permissions?'
+              : isBho
+              ? 'JeevikaAI के अनुमति दीं?'
+              : 'JeevikaAI को अनुमति दें?'}
+          </h2>
+
+          {/* Compact single-line permission list */}
+          <div className="space-y-1.5 text-left">
+            {promptableItems.map((item) => (
               <div
                 key={item.key}
-                className="p-3.5 rounded-xl border border-[#DCE3EA] bg-[#F7F9FC] flex items-center justify-between gap-3"
+                className="flex items-center justify-between px-3 py-2 rounded-xl bg-[#F7F9FC] border border-[#DCE3EA]"
               >
-                <div className="flex items-start gap-3 min-w-0">
-                  <div
-                    className={`w-10 h-10 rounded-xl flex items-center justify-center flex-none ${
-                      item.status === 'granted'
-                        ? 'bg-[#287D73] text-white'
-                        : 'bg-white border border-[#DCE3EA] text-[#245A91]'
-                    }`}
-                  >
-                    <Icon name={item.icon} size={18} />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-sm font-extrabold text-[#17365D] leading-tight">{item.title}</div>
-                    <p className="text-xs text-[#5F6B76] mt-0.5 leading-snug">{item.desc}</p>
-                  </div>
+                <div className="flex items-center gap-2.5">
+                  <Icon name={item.icon} size={15} className="text-[#245A91]" />
+                  <span className="text-xs font-bold text-[#17365D]">{item.label}</span>
                 </div>
-
-                <div className="flex-none">
-                  {item.status === 'prompt' ? (
-                    <button
-                      type="button"
-                      onClick={() => item.onAllow()}
-                      disabled={isRequestingKey !== null}
-                      className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-[#245A91] hover:bg-[#17365D] text-white text-xs font-extrabold transition-colors disabled:opacity-60"
-                    >
-                      {isRequestingKey === item.key || isRequestingKey === 'all'
-                        ? '...'
-                        : isEn
-                        ? 'Allow'
-                        : 'अनुमति दें'}
-                    </button>
-                  ) : (
-                    statusBadge(item.status)
-                  )}
-                </div>
+                <button
+                  type="button"
+                  onClick={() => item.onAllow()}
+                  disabled={isRequestingKey !== null}
+                  className="text-[11px] font-extrabold text-[#287D73] hover:underline disabled:opacity-50"
+                >
+                  {isRequestingKey === item.key ? '...' : isEn ? 'Allow' : 'Allow'}
+                </button>
               </div>
             ))}
           </div>
 
-          {anyBlocked && (
-            <div className="p-3 rounded-xl bg-[#FFF8EB] border border-[#D9822B]/35 text-[11px] text-[#7C4A03] leading-relaxed">
-              {isEn
-                ? 'One or more permissions were blocked earlier. Open your browser/app Site Settings (lock icon in the address bar or Android App Info → Permissions) to enable them.'
-                : 'कुछ अनुमतियाँ ब्राउज़र/फोन सेटिंग्स में ब्लॉक हैं। इन्हें चालू करने के लिए ब्राउज़र के लॉक आइकन (Site Settings) या फोन की App Settings → Permissions में जाकर Allow करें।'}
-            </div>
-          )}
-
-          {/* Action Footer */}
-          <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 pt-1">
+          {/* Native-style action buttons */}
+          <div className="grid grid-cols-2 gap-2 pt-1">
             <button
               type="button"
               onClick={onCancel}
-              className="min-h-[44px] px-4 py-2.5 rounded-xl border border-[#DCE3EA] bg-white hover:bg-[#F7F9FC] text-[#5F6B76] text-xs font-bold transition-colors order-2 sm:order-1"
+              className="min-h-[42px] px-3 py-2 rounded-xl border border-[#DCE3EA] bg-white hover:bg-[#F7F9FC] text-[#5F6B76] text-xs font-bold transition-colors"
             >
-              {allDone
-                ? isEn
-                  ? 'Continue to App'
-                  : 'ऐप पर आगे बढ़ें'
-                : isEn
-                ? 'Cancel / Later'
-                : 'अभी नहीं (रद्द करें)'}
+              {isEn ? "Don't allow" : 'अभी नहीं'}
             </button>
-
-            {!allDone && (
-              <button
-                type="button"
-                onClick={async () => {
-                  const res = await onRequestAll();
-                  const finished =
-                    (res.notifications === 'granted' || res.notifications === 'unsupported') &&
-                    (res.microphone === 'granted' || res.microphone === 'unsupported') &&
-                    (res.geolocation === 'granted' || res.geolocation === 'unsupported');
-                  if (finished) {
-                    onCancel();
-                  }
-                }}
-                disabled={isRequestingKey !== null}
-                className="min-h-[46px] px-5 py-2.5 rounded-xl bg-[#287D73] hover:bg-[#1E6058] text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 transition-colors disabled:opacity-60 order-1 sm:order-2"
-              >
-                <Icon
-                  name={isRequestingKey ? 'refresh' : 'check'}
-                  size={16}
-                  className={isRequestingKey ? 'animate-spin' : ''}
-                />
-                <span>
-                  {isRequestingKey
-                    ? isEn
-                      ? 'Requesting Permissions...'
-                      : 'अनुमतियाँ मांगी जा रही हैं...'
-                    : isEn
-                    ? 'Allow All Permissions'
-                    : 'सभी अनुमतियाँ दें (Allow All)'}
-                </span>
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={async () => {
+                await onRequestAll();
+                onCancel();
+              }}
+              disabled={isRequestingKey !== null}
+              className="min-h-[42px] px-3 py-2 rounded-xl bg-[#245A91] hover:bg-[#17365D] text-white text-xs font-extrabold transition-colors disabled:opacity-60"
+            >
+              {isRequestingKey
+                ? '...'
+                : isEn
+                ? 'Allow'
+                : 'अनुमति दें'}
+            </button>
           </div>
         </div>
       </div>

@@ -8,6 +8,7 @@ import { aiGateway } from '../services/aiGateway';
 import { locationIntelligenceService } from '../services/locationIntelligenceService';
 import { LocationAccuracyBadge } from './LocationAccuracyBadge';
 import { uploadToCloudinary } from '../services/cloudinaryService';
+import type { AppPermissionsState, PermissionStatus } from './PermissionsPrompt';
 
 interface ProfileViewProps {
   profile: BeneficiaryProfile;
@@ -16,6 +17,13 @@ interface ProfileViewProps {
   go: (route: string) => void;
   onLogout?: () => void;
   currentLang?: SupportedLanguage;
+  permissions?: AppPermissionsState;
+  isRequestingPermissionKey?: 'all' | keyof AppPermissionsState | null;
+  onRequestNotification?: () => Promise<PermissionStatus>;
+  onRequestMicrophone?: () => Promise<PermissionStatus>;
+  onRequestGeolocation?: () => Promise<PermissionStatus>;
+  isDarkMode?: boolean;
+  onToggleDarkMode?: () => void;
 }
 
 export const ProfileView: React.FC<ProfileViewProps> = ({
@@ -25,6 +33,13 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   go,
   onLogout,
   currentLang = 'hi',
+  permissions,
+  isRequestingPermissionKey = null,
+  onRequestNotification,
+  onRequestMicrophone,
+  onRequestGeolocation,
+  isDarkMode = false,
+  onToggleDarkMode,
 }) => {
   const [form, setForm] = useState<BeneficiaryProfile>({ ...profile });
   const [activeVoiceField, setActiveVoiceField] = useState<keyof BeneficiaryProfile | null>(null);
@@ -650,6 +665,179 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
             </button>
           </div>
         </div>
+      </div>
+
+      {/* App Settings: Permissions & Theme Change (Bottom of Profile) */}
+      <div className="mt-6 bg-white border border-[#DCE3EA] rounded-2xl p-5 sm:p-6 space-y-5">
+        <div className="flex items-center justify-between gap-2 pb-3 border-b border-[#DCE3EA]">
+          <div>
+            <h3 className="text-sm sm:text-base font-extrabold text-[#17365D] font-['Bricolage_Grotesque']">
+              {currentLang === 'en' ? 'App Settings' : currentLang === 'bho' ? 'ऐप सेटिंग्स' : 'ऐप सेटिंग्स (App Settings)'}
+            </h3>
+            <p className="text-xs text-[#5F6B76] mt-0.5">
+              {currentLang === 'en'
+                ? 'Manage permissions & app appearance'
+                : 'अनुमतियाँ और ऐप की थीम नियंत्रित करें'}
+            </p>
+          </div>
+          <span className="w-9 h-9 rounded-xl bg-[#F7F9FC] border border-[#DCE3EA] text-[#245A91] flex items-center justify-center flex-none">
+            <Icon name="shieldCheck" size={18} />
+          </span>
+        </div>
+
+        {/* Permissions Controls */}
+        {permissions && (
+          <div className="space-y-2.5">
+            <div className="text-[11px] font-extrabold uppercase tracking-wider text-[#5F6B76]">
+              {currentLang === 'en' ? 'Device Permissions' : 'डिवाइस अनुमतियाँ (Permissions)'}
+            </div>
+            {(
+              [
+                {
+                  key: 'notifications' as const,
+                  icon: 'bell',
+                  label: currentLang === 'en' ? 'Push Notifications' : 'पुश नोटिफिकेशन',
+                  sub: currentLang === 'en' ? 'Job & scheme alerts' : 'रोजगार व योजना अलर्ट',
+                  status: permissions.notifications,
+                  onAllow: onRequestNotification,
+                },
+                {
+                  key: 'microphone' as const,
+                  icon: 'mic',
+                  label: currentLang === 'en' ? 'Microphone' : 'माइक्रोफ़ोन',
+                  sub: currentLang === 'en' ? 'Voice assistant' : 'वॉइस असिस्टेंट',
+                  status: permissions.microphone,
+                  onAllow: onRequestMicrophone,
+                },
+                {
+                  key: 'geolocation' as const,
+                  icon: 'pin',
+                  label: currentLang === 'en' ? 'GPS Location' : 'जीपीएस लोकेशन',
+                  sub: currentLang === 'en' ? 'Nearby jobs & centers' : 'नज़दीकी अवसर व केंद्र',
+                  status: permissions.geolocation,
+                  onAllow: onRequestGeolocation,
+                },
+              ] as const
+            ).map((item) => (
+              <div
+                key={item.key}
+                className="flex items-center justify-between gap-3 p-3 rounded-xl bg-[#F7F9FC] border border-[#DCE3EA]"
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <div
+                    className={`w-9 h-9 rounded-xl flex items-center justify-center flex-none ${
+                      item.status === 'granted'
+                        ? 'bg-[#287D73] text-white'
+                        : 'bg-white border border-[#DCE3EA] text-[#245A91]'
+                    }`}
+                  >
+                    <Icon name={item.icon} size={16} />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-xs sm:text-sm font-extrabold text-[#17365D] leading-tight">
+                      {item.label}
+                    </div>
+                    <div className="text-[11px] text-[#5F6B76] truncate">
+                      {item.status === 'denied'
+                        ? currentLang === 'en'
+                          ? 'Blocked — enable in browser/app settings'
+                          : 'ब्लॉक है — ब्राउज़र/ऐप सेटिंग्स से चालू करें'
+                        : item.sub}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex-none">
+                  {item.status === 'granted' ? (
+                    <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#E9F7F4] text-[#1E6058] border border-[#287D73]/25 text-[11px] font-extrabold">
+                      <Icon name="check" size={12} />
+                      {currentLang === 'en' ? 'Allowed' : 'चालू'}
+                    </span>
+                  ) : item.status === 'denied' ? (
+                    <span className="inline-flex items-center px-2.5 py-1 rounded-lg bg-[#FEF2F2] text-[#9E2A2B] border border-[#9E2A2B]/25 text-[11px] font-extrabold">
+                      {currentLang === 'en' ? 'Blocked' : 'ब्लॉक'}
+                    </span>
+                  ) : item.status === 'unsupported' ? (
+                    <span className="inline-flex items-center px-2.5 py-1 rounded-lg bg-slate-100 text-slate-500 text-[11px] font-bold">
+                      N/A
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => item.onAllow?.()}
+                      disabled={isRequestingPermissionKey !== null}
+                      className="min-h-[36px] px-3.5 py-1.5 rounded-xl bg-[#245A91] hover:bg-[#17365D] text-white text-xs font-extrabold transition-colors disabled:opacity-60"
+                    >
+                      {isRequestingPermissionKey === item.key
+                        ? '...'
+                        : currentLang === 'en'
+                        ? 'Allow'
+                        : 'चालू करें'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Theme Switch (Light / Dark Mode) */}
+        {onToggleDarkMode && (
+          <div className="pt-3 border-t border-[#DCE3EA]">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 rounded-xl bg-[#F7F9FC] border border-[#DCE3EA]">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-[#17365D] text-[#F4B966] flex items-center justify-center flex-none">
+                  <Icon name={isDarkMode ? 'moon' : 'sun'} size={17} />
+                </div>
+                <div>
+                  <div className="text-xs sm:text-sm font-extrabold text-[#17365D]">
+                    {currentLang === 'en' ? 'App Theme' : currentLang === 'bho' ? 'ऐप थीम बदलें' : 'ऐप थीम (Theme)'}
+                  </div>
+                  <div className="text-[11px] text-[#5F6B76]">
+                    {isDarkMode
+                      ? currentLang === 'en'
+                        ? 'Dark Mode active'
+                        : 'डार्क मोड सक्रिय है'
+                      : currentLang === 'en'
+                      ? 'Light Mode active'
+                      : 'लाइट मोड सक्रिय है'}
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-white border border-[#DCE3EA]">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (isDarkMode) onToggleDarkMode();
+                  }}
+                  className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-extrabold flex items-center justify-center gap-1.5 transition-colors ${
+                    !isDarkMode
+                      ? 'bg-[#17365D] text-white'
+                      : 'text-[#5F6B76] hover:text-[#17365D]'
+                  }`}
+                >
+                  <Icon name="sun" size={14} />
+                  <span>{currentLang === 'en' ? 'Light' : 'लाइट'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!isDarkMode) onToggleDarkMode();
+                  }}
+                  className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-extrabold flex items-center justify-center gap-1.5 transition-colors ${
+                    isDarkMode
+                      ? 'bg-[#17365D] text-white'
+                      : 'text-[#5F6B76] hover:text-[#17365D]'
+                  }`}
+                >
+                  <Icon name="moon" size={14} />
+                  <span>{currentLang === 'en' ? 'Dark' : 'डार्क'}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </main>
   );

@@ -213,15 +213,8 @@ export const pushNotificationService = {
         updatedAt: new Date().toISOString(),
       };
 
-      // Persist to both Express push engine & Firestore registry in parallel
-      await Promise.allSettled([
-        fetch('/api/push/subscribe', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(docData),
-        }),
-        notificationService.savePushSubscription(docData),
-      ]);
+      // Persist to the backend Web Push registry
+      await notificationService.savePushSubscription(docData);
 
       return { permission, subscribed: true };
     } catch (err: any) {

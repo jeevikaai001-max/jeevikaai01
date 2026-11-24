@@ -48,9 +48,7 @@ import { pushNotificationService } from './services/pushNotificationService';
 import {
   useAppPermissions,
   PermissionsPromptModal,
-  WebsitePermissionsBar,
   PWA_CANCEL_SESSION_KEY,
-  WEB_BANNER_DISMISSED_KEY,
 } from './components/PermissionsPrompt';
 
 export function App() {
@@ -119,13 +117,6 @@ export function App() {
   const [pwaPermissionsCancelled, setPwaPermissionsCancelled] = useState<boolean>(() => {
     try {
       return sessionStorage.getItem(PWA_CANCEL_SESSION_KEY) === 'true';
-    } catch {
-      return false;
-    }
-  });
-  const [webBannerDismissed, setWebBannerDismissed] = useState<boolean>(() => {
-    try {
-      return sessionStorage.getItem(WEB_BANNER_DISMISSED_KEY) === 'true';
     } catch {
       return false;
     }
@@ -333,14 +324,16 @@ export function App() {
     },
   });
 
-  // In installed PWA standalone mode, prompt for needed permissions immediately on open
-  // until all permissions are granted or the user explicitly clicks Cancel for this session.
+  // Show compact native-style permissions popup when permissions are still in 'prompt' state
+  // (never nag about already granted or blocked permissions, and respect Cancel for this session).
   useEffect(() => {
     if (showSplash) return;
-    if (isStandalone && !appPermissions.allGranted && !pwaPermissionsCancelled) {
+    if (appPermissions.hasPromptablePermissions && !pwaPermissionsCancelled) {
       setShowPermissionsModal(true);
+    } else if (!appPermissions.hasPromptablePermissions && showPermissionsModal) {
+      setShowPermissionsModal(false);
     }
-  }, [isStandalone, showSplash, appPermissions.allGranted, pwaPermissionsCancelled]);
+  }, [showSplash, appPermissions.hasPromptablePermissions, pwaPermissionsCancelled, showPermissionsModal]);
 
   // Keep Web Push subscription synced whenever Notification permission is granted or user identity updates
   useEffect(() => {
@@ -1062,28 +1055,11 @@ export function App() {
           onOpenAccount={setAccountMode}
           isDarkMode={isDarkMode}
           onToggleDarkMode={() => setIsDarkMode((prev) => !prev)}
-          onOpenPermissions={() => setShowPermissionsModal(true)}
-          pendingPermissionsCount={appPermissions.pendingCount}
         />
       )}
 
       {/* Primary Route Views */}
       <div className={`flex-1 ${isStandalone && !profile ? 'pt-0' : 'pt-16 sm:pt-20'} pb-20 sm:pb-24`}>
-        {/* Website On-Demand Permissions Bar (Notifications, Microphone, GPS) */}
-        {!showSplash && !isStandalone && !webBannerDismissed && !appPermissions.allGranted && (
-          <WebsitePermissionsBar
-            visible={true}
-            currentLang={currentLang}
-            pendingCount={appPermissions.pendingCount}
-            onOpenModal={() => setShowPermissionsModal(true)}
-            onDismiss={() => {
-              setWebBannerDismissed(true);
-              try {
-                sessionStorage.setItem(WEB_BANNER_DISMISSED_KEY, 'true');
-              } catch {}
-            }}
-          />
-        )}
         {currentView === 'home' && (
           isStandalone && !profile ? (
             <AppWelcome
@@ -1211,6 +1187,13 @@ export function App() {
             go={navigateTo}
             onLogout={handleLogout}
             currentLang={currentLang}
+            permissions={appPermissions.permissions}
+            isRequestingPermissionKey={appPermissions.isRequestingKey}
+            onRequestNotification={appPermissions.requestNotification}
+            onRequestMicrophone={appPermissions.requestMicrophone}
+            onRequestGeolocation={appPermissions.requestGeolocation}
+            isDarkMode={isDarkMode}
+            onToggleDarkMode={() => setIsDarkMode((prev) => !prev)}
           />
         )}
 
@@ -1402,12 +1385,10 @@ export function App() {
         onRequestAll={appPermissions.requestAllPending}
         onCancel={() => {
           setShowPermissionsModal(false);
-          if (isStandalone) {
-            setPwaPermissionsCancelled(true);
-            try {
-              sessionStorage.setItem(PWA_CANCEL_SESSION_KEY, 'true');
-            } catch {}
-          }
+          setPwaPermissionsCancelled(true);
+          try {
+            sessionStorage.setItem(PWA_CANCEL_SESSION_KEY, 'true');
+          } catch {}
         }}
       />
 
