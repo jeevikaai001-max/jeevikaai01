@@ -16,7 +16,7 @@ const LOCATION_DATA_CACHE_KEY = 'jeevika_location_livelihood_cache_v2';
 const ACTIVE_LOCATION_KEY = 'jeevika_active_location_v2';
 const ACCURACY_STORAGE_KEY = 'jeevika_location_accuracy_v2';
 
-export const DEFAULT_SCHEME_IMAGE = '/src/assets/images/hero_livelihood_banner_1795513568498.jpg';
+export const DEFAULT_SCHEME_IMAGE = '';
 
 export interface LocationDetectionResult {
   location: string;
@@ -958,7 +958,15 @@ class LocationIntelligenceService {
       }
       const cached = localStorage.getItem(LOCATION_DATA_CACHE_KEY);
       if (cached) {
-        this.cachedData = JSON.parse(cached);
+        const parsed = JSON.parse(cached) as LocationLivelihoodData;
+        if (parsed && Array.isArray(parsed.schemes)) {
+          parsed.schemes = parsed.schemes.map((s) =>
+            s && typeof s.imageUrl === 'string' && s.imageUrl.includes('hero_livelihood_banner_')
+              ? { ...s, imageUrl: undefined }
+              : s
+          );
+        }
+        this.cachedData = parsed;
       }
       const savedAcc = localStorage.getItem(ACCURACY_STORAGE_KEY);
       if (savedAcc) {
@@ -1338,8 +1346,7 @@ class LocationIntelligenceService {
         eligibility: '18 पारंपरिक कारीगर एवं शिल्पकार (दर्जी, लोहार, बढ़ई, राजमिस्त्री आदि)',
         applyOffice: `नजदीकी CSC केंद्र या ग्राम पंचायत सचिवालय, ${district}`,
         category: 'toolkit',
-        financialSupport: '₹15,000 टूलकिट अनुदान + ₹500/दिन प्रशिक्षण वजीफा',
-        imageUrl: DEFAULT_SCHEME_IMAGE
+        financialSupport: '₹15,000 टूलकिट अनुदान + ₹500/दिन प्रशिक्षण वजीफा'
       },
       {
         id: 'sch-gen-2',
@@ -1349,8 +1356,7 @@ class LocationIntelligenceService {
         eligibility: 'जिले के पारंपरिक उद्योग से जुड़े स्थानीय कामगार एवं हस्तशिल्पी',
         applyOffice: `जिला उद्योग एवं उद्यम प्रोत्साहन केंद्र (DIC), ${district}`,
         category: 'state',
-        financialSupport: '₹25,000 तक टूलकिट + व्यवसाय हेतु मार्जिन मनी',
-        imageUrl: DEFAULT_SCHEME_IMAGE
+        financialSupport: '₹25,000 तक टूलकिट + व्यवसाय हेतु मार्जिन मनी'
       },
       {
         id: 'sch-gen-3',
@@ -1360,8 +1366,7 @@ class LocationIntelligenceService {
         eligibility: 'नया व्यवसाय शुरू करने या बढ़ाने वाले ग्रामीण व शहरी नागरिक',
         applyOffice: `किसी भी राष्ट्रीयकृत बैंक (PNB, SBI, Baroda) शाखा, ${district}`,
         category: 'loan',
-        financialSupport: 'शिशु लोन: ₹50,000 तक मात्र 3 दिन में स्वीकृत',
-        imageUrl: DEFAULT_SCHEME_IMAGE
+        financialSupport: 'शिशु लोन: ₹50,000 तक मात्र 3 दिन में स्वीकृत'
       }
     ];
 

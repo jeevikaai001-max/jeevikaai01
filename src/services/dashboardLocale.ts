@@ -1,6 +1,5 @@
 import { SupportedLanguage, StepOption, EvaluatedPathway, Pathway, Opportunity, GovernmentScheme } from '../types';
 import { PATHWAY_HI } from '../data/pathwayHindi';
-import { DEFAULT_SCHEME_IMAGE } from './locationIntelligenceService';
 
 type Row = { hi: string; bho: string; en: string; hin: string };
 
@@ -353,7 +352,6 @@ export const FALLBACK_SCHEMES: GovernmentScheme[] = [
     applyOffice: 'नजदीकी CSC केंद्र या ग्राम पंचायत सचिवालय',
     category: 'central',
     financialSupport: '₹15,000 टूलकिट अनुदान + ₹500/दिन प्रशिक्षण वजीफा',
-    imageUrl: DEFAULT_SCHEME_IMAGE,
   },
   {
     id: 'fb-odop',
@@ -364,7 +362,6 @@ export const FALLBACK_SCHEMES: GovernmentScheme[] = [
     applyOffice: 'जिला उद्योग एवं उद्यम प्रोत्साहन केंद्र (DIC), महराजगंज',
     category: 'state',
     financialSupport: '₹25,000 तक टूलकिट + व्यवसाय हेतु मार्जिन मनी',
-    imageUrl: DEFAULT_SCHEME_IMAGE,
   },
   {
     id: 'fb-mudra',
@@ -375,6 +372,5 @@ export const FALLBACK_SCHEMES: GovernmentScheme[] = [
     applyOffice: 'किसी भी राष्ट्रीयकृत बैंक (PNB, SBI, Baroda) शाखा में',
     category: 'loan',
     financialSupport: 'शिशु लोन: ₹50,000 तक मात्र 3 दिन में स्वीकृत',
-    imageUrl: DEFAULT_SCHEME_IMAGE,
   },
 ];

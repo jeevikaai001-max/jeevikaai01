@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 import { AppView, GovernmentScheme, SupportedLanguage } from '../types';
-import { DEFAULT_SCHEME_IMAGE } from '../services/locationIntelligenceService';
 import { dt, schemeName, isEnglishLike } from '../services/dashboardLocale';
 import { Icon } from './Icons';
 
@@ -59,8 +58,11 @@ const KNOWN_INTERNAL_VIEWS = new Set([
 
 export const SchemeCard: React.FC<SchemeCardProps> = ({ scheme, lang, onNavigate }) => {
   const [expanded, setExpanded] = useState(false);
+  const [imgError, setImgError] = useState(false);
 
-  const schemeImg = scheme.imageUrl || DEFAULT_SCHEME_IMAGE;
+  const rawImg = scheme.imageUrl?.trim() || '';
+  const isMockImg = rawImg.includes('hero_livelihood_banner_');
+  const schemeImg = !imgError && rawImg && !isMockImg ? rawImg : '';
   const title = schemeName(scheme, lang);
   const primaryBenefit = scheme.financialSupport || scheme.benefit;
   const hasSecondaryBenefit =
@@ -95,34 +97,35 @@ export const SchemeCard: React.FC<SchemeCardProps> = ({ scheme, lang, onNavigate
 
   return (
     <article className="rounded-2xl border border-[#DCE3EA] bg-white flex flex-col overflow-hidden transition-colors hover:border-[#245A91]">
-      <div className="w-full h-36 sm:h-40 bg-[#F7F9FC] relative overflow-hidden flex-none border-b border-[#DCE3EA]">
-        <img
-          src={schemeImg}
-          alt={title}
-          loading="lazy"
-          className="w-full h-full object-cover object-center"
-          onError={(e) => {
-            const img = e.target as HTMLImageElement;
-            if (!img.dataset.fallbackApplied) {
-              img.dataset.fallbackApplied = '1';
-              img.src = DEFAULT_SCHEME_IMAGE;
-            }
-          }}
-        />
-        {scheme.isAdminUploaded && (
-          <span className="absolute top-2.5 left-2.5 px-2.5 py-0.5 rounded-md text-[10px] font-bold bg-[#17365D]/90 text-white border border-white/15">
-            {lang === 'en' ? 'Featured Update' : 'विशेष योजना'}
-          </span>
-        )}
-      </div>
+      {schemeImg && (
+        <div className="w-full h-36 sm:h-40 bg-[#F7F9FC] relative overflow-hidden flex-none border-b border-[#DCE3EA]">
+          <img
+            src={schemeImg}
+            alt={title}
+            loading="lazy"
+            className="w-full h-full object-cover object-center"
+            onError={() => setImgError(true)}
+          />
+          {scheme.isAdminUploaded && (
+            <span className="absolute top-2.5 left-2.5 px-2.5 py-0.5 rounded-md text-[10px] font-bold bg-[#17365D]/90 text-white border border-white/15">
+              {lang === 'en' ? 'Featured Update' : 'विशेष योजना'}
+            </span>
+          )}
+        </div>
+      )}
 
       <div className="p-4 flex flex-col gap-2.5 flex-1">
-        <div className="flex items-center gap-1.5 text-xs font-medium text-[#5F6B76]">
+        <div className="flex items-center gap-1.5 text-xs font-medium text-[#5F6B76] flex-wrap">
           <span>{categoryText}</span>
           <span aria-hidden="true">·</span>
           <span className="text-[#287D73] font-semibold">
             {lang === 'bho' ? 'सक्रिय' : isEnglishLike(lang) ? 'Verified' : 'सक्रिय योजना'}
           </span>
+          {scheme.isAdminUploaded && !schemeImg && (
+            <span className="ml-auto px-2 py-0.5 rounded-md text-[10px] font-bold bg-[#17365D]/10 text-[#17365D]">
+              {lang === 'en' ? 'Featured Update' : 'विशेष योजना'}
+            </span>
+          )}
         </div>
 
         <h3

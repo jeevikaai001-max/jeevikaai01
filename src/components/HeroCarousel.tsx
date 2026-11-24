@@ -3,7 +3,6 @@ import { Icon } from './Icons';
 import { HeroSlide, AppView } from '../types';
 import {
   mediaStorageService,
-  DEFAULT_HERO_SLIDES,
   buildHeroSlidesFromMedia,
 } from '../services/cloudinaryService';
 
@@ -40,18 +39,18 @@ function resolveInternalView(ctaUrl?: string): AppView | null {
 }
 
 export const HeroCarousel: React.FC<HeroCarouselProps> = ({ go }) => {
-  const [slides, setSlides] = useState<HeroSlide[]>(DEFAULT_HERO_SLIDES);
+  const [slides, setSlides] = useState<HeroSlide[]>([]);
   const [currentIndex, setCurrentIndex] = useState<number>(0);
   const [isPaused, setIsPaused] = useState<boolean>(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const firstSlideIdRef = useRef<string>(DEFAULT_HERO_SLIDES[0]?.id || '');
+  const firstSlideIdRef = useRef<string>('');
 
   useEffect(() => {
     let isMounted = true;
 
     const applySlides = (nextSlides: HeroSlide[]) => {
       if (!isMounted) return;
-      const valid = nextSlides.length > 0 ? nextSlides : DEFAULT_HERO_SLIDES;
+      const valid = (nextSlides || []).filter((s) => Boolean(s && s.imageUrl && s.imageUrl.trim()));
       setSlides(valid);
       const nextFirstId = valid[0]?.id || '';
       if (nextFirstId !== firstSlideIdRef.current) {
@@ -97,7 +96,7 @@ export const HeroCarousel: React.FC<HeroCarouselProps> = ({ go }) => {
     };
   }, [isPaused, slides.length]);
 
-  const validSlides = (slides || []).filter(Boolean);
+  const validSlides = (slides || []).filter((s) => Boolean(s && s.imageUrl && s.imageUrl.trim()));
   if (!validSlides.length) return null;
 
   const current = validSlides[currentIndex] || validSlides[0];
@@ -106,6 +105,8 @@ export const HeroCarousel: React.FC<HeroCarouselProps> = ({ go }) => {
   const internalCtaView = resolveInternalView(current.ctaUrl);
 
   return (
+    <section className="bg-[#17365D] border-b border-[#DCE3EA] py-3 sm:py-5">
+      <div className="max-w-6xl mx-auto px-3 sm:px-6">
     <div
       className="relative w-full rounded-2xl overflow-hidden border border-[#DCE3EA]/30 bg-[#0F233D] group"
       onMouseEnter={() => setIsPaused(true)}
@@ -124,16 +125,12 @@ export const HeroCarousel: React.FC<HeroCarouselProps> = ({ go }) => {
               }`}
             >
               <img
-                src={slide.imageUrl || '/src/assets/images/hero_livelihood_banner_1795513568498.jpg'}
+                src={slide.imageUrl}
                 alt={slide.title || 'JeevikaAI Banner'}
                 className="w-full h-full object-cover object-center"
                 loading={idx === 0 ? 'eager' : 'lazy'}
                 onError={(e) => {
-                  const img = e.target as HTMLImageElement;
-                  if (!img.dataset.fallbackApplied) {
-                    img.dataset.fallbackApplied = '1';
-                    img.src = '/src/assets/images/hero_livelihood_banner_1795513568498.jpg';
-                  }
+                  (e.currentTarget as HTMLImageElement).style.display = 'none';
                 }}
               />
               <div className="absolute inset-0 bg-gradient-to-t from-[#0B1B30]/90 via-[#0B1B30]/40 to-transparent" />
@@ -246,5 +243,7 @@ export const HeroCarousel: React.FC<HeroCarouselProps> = ({ go }) => {
         )}
       </div>
     </div>
+      </div>
+    </section>
   );
 };

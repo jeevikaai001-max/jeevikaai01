@@ -746,11 +746,13 @@ export const Dashboard: React.FC<DashboardProps> = ({
           <Panel id="schemes-section">
             <SectionHead icon="shieldCheck" tag={districtShort} title={dt('schemesTitle', L)} />
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3 sm:gap-4">
-              {[...uploadedSchemes, ...schemes.slice(0, 3)].map((s) => (
+              {(uploadedSchemes.length > 0 ? uploadedSchemes : schemes.slice(0, 3)).map((s) => (
                 <SchemeCard key={s.id} scheme={s} lang={L} onNavigate={go} />
               ))}
             </div>
-            {schemesAreFallback && <p className="mt-3 text-xs text-[#5F6B76]">{dt('schemeFallbackNote', L)}</p>}
+            {uploadedSchemes.length === 0 && schemesAreFallback && (
+              <p className="mt-3 text-xs text-[#5F6B76]">{dt('schemeFallbackNote', L)}</p>
+            )}
           </Panel>
 
           {/* Pathways */}

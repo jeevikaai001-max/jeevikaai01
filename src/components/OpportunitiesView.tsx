@@ -601,7 +601,7 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {[...uploadedSchemes, ...(locationData?.schemes || [])].map((scheme) => (
+            {(uploadedSchemes.length > 0 ? uploadedSchemes : (locationData?.schemes || [])).map((scheme) => (
               <SchemeCard key={scheme.id} scheme={scheme} lang={currentLang} onNavigate={go} />
             ))}
           </div>

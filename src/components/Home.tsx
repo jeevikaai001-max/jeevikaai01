@@ -111,12 +111,8 @@ export const Home: React.FC<HomeProps> = ({
 
   return (
     <main className="bg-white min-h-screen">
-      {/* 1. Top Featured Skill & Livelihood Banner Carousel */}
-      <section className="bg-[#17365D] border-b border-[#DCE3EA] py-3 sm:py-5">
-        <div className="max-w-6xl mx-auto px-3 sm:px-6">
-          <HeroCarousel go={go} />
-        </div>
-      </section>
+      {/* 1. Top Featured Skill & Livelihood Banner Carousel (renders only when banners are uploaded) */}
+      <HeroCarousel go={go} />
 
       {/* 2. Main Hero Section */}
       <section className="bg-white border-b border-[#DCE3EA] py-10 md:py-14">

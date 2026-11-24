@@ -206,41 +206,7 @@ export function generateTagsFromFilename(filename: string): string[] {
     .filter((w) => w.length > 2);
 }
 
-export const DEFAULT_HERO_SLIDES: HeroSlide[] = [
-  {
-    id: 'default-hero-1',
-    imageUrl: '/src/assets/images/hero_livelihood_banner_1795513568498.jpg',
-    title: 'आवाज़ से अपना कौशल और आजीविका मार्ग खोजें',
-    subtitle: 'हिंदी व भोजपुरी में बोलकर निशुल्क कौशल रोडमैप, पीएमकेवीवाई केंद्र और पास के रोजगार जानें।',
-    tag: 'आवाज़ मार्गदर्शन',
-    linkView: 'assessment',
-    ctaLabel: 'मूल्यांकन शुरू करें',
-    order: 0,
-    active: true,
-  },
-  {
-    id: 'default-hero-2',
-    imageUrl: '/src/assets/images/trade_solar_1795513567205.jpg',
-    title: 'सोलर पैनल व ग्रीन एनर्जी प्रशिक्षण अवसर',
-    subtitle: 'NSQF स्तर 4 प्रमाणित कोर्स, स्थानीय रोजगार और सरकारी अनुदान जानकारी आपके जिले में।',
-    tag: 'उभरता क्षेत्र',
-    linkView: 'training',
-    ctaLabel: 'प्रशिक्षण केंद्र देखें',
-    order: 1,
-    active: true,
-  },
-  {
-    id: 'default-hero-3',
-    imageUrl: '/src/assets/images/trade_computer_1795513567280.jpg',
-    title: 'डिजिटल सेवा केंद्र व कंप्यूटर साक्षरता',
-    subtitle: 'ऑनलाइन फॉर्म, बिलिंग और ई-गवर्नेंस सेवाओं के माध्यम से स्थानीय आय के नए अवसर।',
-    tag: 'डिजिटल कौशल',
-    linkView: 'opportunities',
-    ctaLabel: 'अवसर देखें',
-    order: 2,
-    active: true,
-  },
-];
+export const DEFAULT_HERO_SLIDES: HeroSlide[] = [];
 
 export const INITIAL_SHOWCASE_PRODUCTS: ShowcaseProduct[] = [];
 
