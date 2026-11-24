@@ -213,6 +213,17 @@ export const Navbar: React.FC<NavbarProps> = ({
               </div>
             )}
 
+            {!isStandalone && (profileName || currentUser) && (
+              <button
+                onClick={onLogout}
+                className="min-h-[38px] px-2.5 py-1.5 rounded-xl bg-[#9E2A2B] hover:bg-[#7E1F20] text-white text-[11px] sm:text-xs font-extrabold transition-colors flex items-center gap-1 flex-shrink-0"
+                title="लॉगआउट (Logout)"
+              >
+                <Icon name="logout" size={13} />
+                <span>लॉगआउट</span>
+              </button>
+            )}
+
             {!isInstalled && !isStandalone && (
               <button
                 onClick={async () => {

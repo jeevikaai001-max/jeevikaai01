@@ -714,10 +714,12 @@ export const Assessment: React.FC<AssessmentProps> = ({
     const finalProfile = profileRef.current || answers;
     storageService.saveProfile(finalProfile);
 
-    try {
-      firestoreService.syncLocalProfileToFirestore(finalProfile).catch(() => {});
-    } catch {
-      // Ignore
+    if (!finalProfile.isDemo) {
+      try {
+        firestoreService.syncLocalProfileToFirestore(finalProfile).catch(() => {});
+      } catch {
+        // Ignore
+      }
     }
 
     onSubmit(finalProfile);
@@ -726,14 +728,15 @@ export const Assessment: React.FC<AssessmentProps> = ({
   const handleLoadDemoProfile = () => {
     speechService.stopSpeaking();
     speechService.stopListening();
-    setAnswers({ ...DEMO });
-    profileRef.current = { ...DEMO };
+    const demoData = { ...DEMO, isDemo: true };
+    setAnswers(demoData);
+    profileRef.current = demoData;
     setCurrentStepIndex(STEPS.length - 1);
     setConversationState('confirming_answer');
     onNotify(
       currentLang === 'en'
-        ? 'Demo profile (Sunita Devi) loaded.'
-        : 'डेमो प्रोफाइल (सुनीता देवी) लोड हो गई है।'
+        ? 'Demo profile (Sunita Devi) loaded (preview only — not saved to database).'
+        : 'डेमो प्रोफाइल (सुनीता देवी) लोड हो गई है (केवल प्रीव्यू — डेटाबेस में सेव नहीं होगी)।'
     );
   };
 

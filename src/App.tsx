@@ -9,7 +9,13 @@ import {
 } from './types';
 import { DEMO } from './data/mockData';
 import { storageService } from './services/storageService';
-import { authService, AppUser, firestoreService } from './services/firebase';
+import {
+  authService,
+  AppUser,
+  firestoreService,
+  isRegisteredUser,
+  normalizePhone,
+} from './services/firebase';
 import {
   locationIntelligenceService,
   LocationDetectionResult,
@@ -215,7 +221,9 @@ export function App() {
               };
               setProfile(nextProfile);
               storageService.saveProfile(nextProfile);
-              firestoreService.syncLocalProfileToFirestore(nextProfile).catch(() => {});
+              if (isRegisteredUser(authService.getCurrentUser()) && !nextProfile.isDemo) {
+                firestoreService.syncLocalProfileToFirestore(nextProfile).catch(() => {});
+              }
             }
 
             setLocationData((prev) =>
@@ -448,9 +456,23 @@ export function App() {
       locationIntelligenceService.setActiveLocation(targetLoc);
     }
 
+    const activeRegisteredUser = isRegisteredUser(currentUser)
+      ? currentUser
+      : isRegisteredUser(authService.getCurrentUser())
+      ? authService.getCurrentUser()
+      : null;
+    const isDemoOrGuestRun = Boolean(newProfile.isDemo) || !activeRegisteredUser;
+
     const enrichedInputProfile: BeneficiaryProfile = {
       ...newProfile,
       location: targetLoc,
+      isDemo: isDemoOrGuestRun,
+      ...(activeRegisteredUser && !isDemoOrGuestRun
+        ? {
+            phone: activeRegisteredUser.phone || newProfile.phone,
+            status: 'completed' as const,
+          }
+        : {}),
       ...(liveCoords
         ? {
             latitude: liveCoords.latitude,
@@ -462,6 +484,11 @@ export function App() {
 
     setProfile(enrichedInputProfile);
     await storageService.saveProfile(enrichedInputProfile);
+
+    // Immediately persist completed profile to Firestore ONLY for genuinely registered users
+    if (activeRegisteredUser && !isDemoOrGuestRun) {
+      firestoreService.saveUserProfile(activeRegisteredUser.uid, enrichedInputProfile, true, true).catch(() => {});
+    }
 
     try {
       localStorage.removeItem('jeevika_current_step_v1');
@@ -504,6 +531,13 @@ export function App() {
       }
     } catch {}
 
+    // Persist final AI-enriched profile to Firestore ONLY for genuinely registered users
+    if (activeRegisteredUser && !isDemoOrGuestRun) {
+      try {
+        await firestoreService.saveUserProfile(activeRegisteredUser.uid, analyzedProfile, true, true);
+      } catch {}
+    }
+
     await new Promise((resolve) => setTimeout(resolve, 1600));
     clearTimeout(step1Timer);
     clearTimeout(step2Timer);
@@ -525,6 +559,7 @@ export function App() {
     const liveCoords = locationIntelligenceService.getLiveGpsCoordinates();
     const demoProf: BeneficiaryProfile = {
       ...DEMO,
+      isDemo: true,
       location: activeLocation || '',
       ...(liveCoords ? { latitude: liveCoords.latitude, longitude: liveCoords.longitude } : {}),
     };
@@ -543,6 +578,7 @@ export function App() {
         };
         const syncedDemo: BeneficiaryProfile = {
           ...demoProf,
+          isDemo: true,
           location: detected.location,
           latitude: detected.latitude,
           longitude: detected.longitude,
@@ -639,18 +675,34 @@ export function App() {
 
   const handleProfileUpdate = async (updated: BeneficiaryProfile) => {
     const prevProfile = profile;
-    setProfile(updated);
-    storageService.saveProfile(updated);
+    const registeredUser = isRegisteredUser(currentUser)
+      ? currentUser
+      : isRegisteredUser(authService.getCurrentUser())
+      ? authService.getCurrentUser()
+      : null;
+    // If editing a demo/guest profile (e.g. demo photo upload or Roadmap demo preview), keep isDemo: true
+    // and NEVER create an account or write to Firestore /users.
+    const isDemoEdit = Boolean(updated.isDemo) || Boolean(prevProfile?.isDemo) || !registeredUser;
+    const safeUpdated: BeneficiaryProfile = {
+      ...updated,
+      isDemo: isDemoEdit,
+      ...(registeredUser && !isDemoEdit ? { phone: registeredUser.phone || updated.phone } : {}),
+    };
 
-    if (updated.location && updated.location.trim() !== activeLocation) {
-      setActiveLocation(updated.location.trim());
-      locationIntelligenceService.setActiveLocation(updated.location.trim());
+    setProfile(safeUpdated);
+    storageService.saveProfile(safeUpdated);
+
+    if (safeUpdated.location && safeUpdated.location.trim() !== activeLocation) {
+      setActiveLocation(safeUpdated.location.trim());
+      locationIntelligenceService.setActiveLocation(safeUpdated.location.trim());
     }
 
-    try {
-      await firestoreService.syncLocalProfileToFirestore(updated);
-    } catch (err) {
-      console.error('Error syncing profile change to Firestore:', err);
+    if (registeredUser && !isDemoEdit) {
+      try {
+        await firestoreService.saveUserProfile(registeredUser.uid, safeUpdated, true, true);
+      } catch (err) {
+        console.error('Error syncing profile change to Firestore:', err);
+      }
     }
 
     const profileChanged =
@@ -691,10 +743,10 @@ export function App() {
 
     try {
       aiGateway
-        .analyzeProfile({ profile: updated, language: currentLang })
+        .analyzeProfile({ profile: safeUpdated, language: currentLang })
         .then((data) => {
           if (data?.analysis) {
-            const enriched = { ...updated, aiAnalysis: data.analysis };
+            const enriched = { ...safeUpdated, aiAnalysis: data.analysis };
             setProfile(enriched);
             storageService.saveProfile(enriched);
           }
@@ -737,7 +789,9 @@ export function App() {
       };
       setProfile(nextProfile);
       storageService.saveProfile(nextProfile);
-      firestoreService.syncLocalProfileToFirestore(nextProfile).catch(() => {});
+      if (isRegisteredUser(authService.getCurrentUser()) && !nextProfile.isDemo) {
+        firestoreService.syncLocalProfileToFirestore(nextProfile).catch(() => {});
+      }
     }
 
     const seq = ++locationFetchSeqRef.current;
@@ -888,11 +942,34 @@ export function App() {
 
   const handleAccountLoggedIn = async (user: AppUser): Promise<boolean> => {
     setCurrentUser(user);
+    const userPhone = normalizePhone(user.phone || '');
+
+    const isMatchingLocalProfile = (prof: BeneficiaryProfile | null): boolean => {
+      if (!prof || prof.isDemo === true) return false;
+      if (userPhone) {
+        const pPhone = normalizePhone(prof.phone || '');
+        return Boolean(pPhone && pPhone === userPhone);
+      }
+      return false;
+    };
+
     try {
+      // 1. Fetch profile from Firestore by UID, and also by phone number if needed
       let saved = await firestoreService.getUserProfile(user.uid);
+      if (
+        (!saved || !saved.skills || !saved.education || saved.status === 'pending') &&
+        userPhone
+      ) {
+        const byPhone = await firestoreService.getUserProfileByPhone(userPhone);
+        if (byPhone?.profile) {
+          saved = byPhone.profile;
+        }
+      }
+
+      // 2. Only fall back to localStorage profile if it belongs to this exact registered user (NEVER demo!)
       if (!saved || !saved.skills || !saved.education || saved.status === 'pending') {
         const localProf = storageService.loadProfile();
-        if (localProf && localProf.skills && localProf.education) {
+        if (isMatchingLocalProfile(localProf) && localProf && localProf.skills && localProf.education) {
           saved = localProf;
           await firestoreService.saveUserProfile(user.uid, localProf, true, true);
         }
@@ -900,6 +977,7 @@ export function App() {
 
       const isComplete = Boolean(
         saved &&
+        saved.isDemo !== true &&
         saved.name &&
         !saved.name.toLowerCase().startsWith('user') &&
         !saved.name.includes('नागरिक (') &&
@@ -910,8 +988,12 @@ export function App() {
       );
 
       if (isComplete && saved) {
-        const { consentSaved: _c, updatedAt: _u, ...restored } = saved as any;
-        const restoredProfile = restored as BeneficiaryProfile;
+        const { consentSaved: _c, updatedAt: _u, pinHash: _p, ...restored } = saved as any;
+        const restoredProfile: BeneficiaryProfile = {
+          ...(restored as BeneficiaryProfile),
+          phone: userPhone || (restored as BeneficiaryProfile).phone,
+          isDemo: false,
+        };
         setProfile(restoredProfile);
         await storageService.saveProfile(restoredProfile);
         if (restoredProfile.location) {
@@ -923,14 +1005,6 @@ export function App() {
             ? `स्वागत बा, ${restoredProfile.name}! राउर डैशबोर्ड लोड हो गइल।`
             : `स्वागत है, ${restoredProfile.name}! आपका डैशबोर्ड लोड हो गया है।`
         );
-        navigateTo('dashboard');
-        return true;
-      }
-
-      const fallbackProf = storageService.loadProfile();
-      if (fallbackProf && fallbackProf.skills && fallbackProf.education) {
-        setProfile(fallbackProf);
-        await firestoreService.saveUserProfile(user.uid, fallbackProf, true, true);
         navigateTo('dashboard');
         return true;
       }
@@ -949,8 +1023,8 @@ export function App() {
     } catch (err) {
       console.warn('Could not load saved profile after login:', err);
       const localProf = storageService.loadProfile();
-      if (localProf && localProf.skills && localProf.education) {
-        setProfile(localProf);
+      if (isMatchingLocalProfile(localProf) && localProf && localProf.skills && localProf.education) {
+        setProfile({ ...localProf, isDemo: false });
         navigateTo('dashboard');
         return true;
       }
@@ -1354,7 +1428,7 @@ export function App() {
         isOpen={accountMode !== null}
         mode={accountMode || 'create'}
         currentLang={currentLang}
-        profileName={profile?.name}
+        profileName={profile && !profile.isDemo ? profile.name : undefined}
         onClose={() => setAccountMode(null)}
         onSwitchMode={setAccountMode}
         onCreated={handleAccountCreated}

@@ -224,6 +224,7 @@ export const AssistedAccountModal: React.FC<Props> = ({
   const [phoneCheckResult, setPhoneCheckResult] = useState<PhoneCheckResult | null>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   const digitInputRef = useRef<HTMLInputElement>(null);
+  const isAdvancingRef = useRef<boolean>(false);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -463,90 +464,84 @@ export const AssistedAccountModal: React.FC<Props> = ({
   };
 
   const next = async () => {
-    speechService.stopSpeaking();
-    stopMic();
-    if (step === 'intro') {
-      setStep('phone');
-    } else if (step === 'phone') {
-      const p = normalizePhone(phone);
-      if (!isValidIndianMobile(p)) {
-        setMessage(tx('badPhone', L));
-        speechService.speak(tx('badPhone', L), L, () => {});
-        return;
-      }
-      setPhone(p);
-      setIsCheckingPhone(true);
-      try {
-        const check = await authService.checkPhoneExists(p);
-        setIsCheckingPhone(false);
-        setPhoneCheckResult(check);
-        if (check.exists) {
-          if (mode === 'create') {
-            onSwitchMode('login');
-            setStep('pin');
-            const alertText =
-              L === 'bho'
-                ? 'एह नंबर से खाता पहिले से बनल बा। आपन 4 अंक के PIN बताईं।'
-                : 'यह नंबर पहले से पंजीकृत है। कृपया अपना 4 अंक का PIN बताइए।';
-            speechService.speak(alertText, L, () => {});
-            return;
-          }
-        } else if (mode === 'login') {
-          setMessage(
-            L === 'bho'
-              ? 'एह नंबर से खाता नइखे। कृपया नया खाता बनाईं।'
-              : 'इस नंबर से खाता नहीं मिला। कृपया नया खाता बनाएं।'
-          );
+    if (isAdvancingRef.current) return;
+    isAdvancingRef.current = true;
+    try {
+      speechService.stopSpeaking();
+      stopMic();
+      if (step === 'intro') {
+        setStep('phone');
+      } else if (step === 'phone') {
+        const p = normalizePhone(phone);
+        if (!isValidIndianMobile(p)) {
+          setMessage(tx('badPhone', L));
+          speechService.speak(tx('badPhone', L), L, () => {});
           return;
         }
-      } catch {
-        setIsCheckingPhone(false);
-      }
-      setStep('pin');
-    } else if (step === 'pin') {
-      if (pin.length !== 4) return;
-      if (mode === 'create') setStep('pin2');
-      else run(pin);
-    } else if (step === 'pin2') {
-      if (pin2.length !== 4) return;
-      if (pin2 !== pin) {
-        setPin('');
-        setPin2('');
-        setMessage(tx('mismatch', L));
-        setStep('pin');
-        return;
-      }
-      run(pin);
-    } else if (step === 'forgot_phone') {
-      const p = normalizePhone(phone);
-      if (!isValidIndianMobile(p)) {
-        setMessage(tx('badPhone', L));
-        return;
-      }
-      setPhone(p);
-      setMessage('');
-      setStep('forgot_verify');
-    } else if (step === 'forgot_verify') {
-      if (!forgotVerifyAnswer.trim()) {
-        setMessage('कृपया अपनी शिक्षा या नाम दर्ज करें।');
-        return;
-      }
-      setMessage('');
-      setStep('forgot_newpin');
-    } else if (step === 'forgot_newpin') {
-      if (pin.length !== 4) return;
-      setStep('busy');
-      try {
-        const user = await authService.registerWithPhone(phone, pin, profileName);
-        await onLoggedIn(user);
-        setDoneText(tx('doneReset', L));
-        setStep('done');
-        setTimeout(() => {
-          onClose();
-        }, 800);
-      } catch {
+        setPhone(p);
+        setIsCheckingPhone(true);
         try {
-          const user = await authService.loginWithPhone(phone, pin);
+          const check = await authService.checkPhoneExists(p);
+          setIsCheckingPhone(false);
+          setPhoneCheckResult(check);
+          if (check.exists) {
+            if (mode === 'create') {
+              onSwitchMode('login');
+              setStep('pin');
+              const alertText =
+                L === 'bho'
+                  ? 'एह नंबर से खाता पहिले से बनल बा। आपन 4 अंक के PIN बताईं।'
+                  : 'यह नंबर पहले से पंजीकृत है। कृपया अपना 4 अंक का PIN बताइए।';
+              speechService.speak(alertText, L, () => {});
+              return;
+            }
+          } else if (mode === 'login') {
+            setMessage(
+              L === 'bho'
+                ? 'एह नंबर से खाता नइखे। कृपया नया खाता बनाईं।'
+                : 'इस नंबर से खाता नहीं मिला। कृपया नया खाता बनाएं।'
+            );
+            return;
+          }
+        } catch {
+          setIsCheckingPhone(false);
+        }
+        setStep('pin');
+      } else if (step === 'pin') {
+        if (pin.length !== 4) return;
+        if (mode === 'create') setStep('pin2');
+        else await run(pin);
+      } else if (step === 'pin2') {
+        if (pin2.length !== 4) return;
+        if (pin2 !== pin) {
+          setPin('');
+          setPin2('');
+          setMessage(tx('mismatch', L));
+          setStep('pin');
+          return;
+        }
+        await run(pin);
+      } else if (step === 'forgot_phone') {
+        const p = normalizePhone(phone);
+        if (!isValidIndianMobile(p)) {
+          setMessage(tx('badPhone', L));
+          return;
+        }
+        setPhone(p);
+        setMessage('');
+        setStep('forgot_verify');
+      } else if (step === 'forgot_verify') {
+        if (!forgotVerifyAnswer.trim()) {
+          setMessage('कृपया अपनी शिक्षा या नाम दर्ज करें।');
+          return;
+        }
+        setMessage('');
+        setStep('forgot_newpin');
+      } else if (step === 'forgot_newpin') {
+        if (pin.length !== 4) return;
+        setStep('busy');
+        try {
+          const user = await authService.resetPhonePin(phone, pin);
           await onLoggedIn(user);
           setDoneText(tx('doneReset', L));
           setStep('done');
@@ -557,6 +552,8 @@ export const AssistedAccountModal: React.FC<Props> = ({
           showError('unknown');
         }
       }
+    } finally {
+      isAdvancingRef.current = false;
     }
   };
 

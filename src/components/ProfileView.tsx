@@ -59,7 +59,15 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
     try {
       const url = await uploadToCloudinary(file, 'user_avatars');
       handleChange('avatarUrl', url);
-      onNotify(currentLang === 'bho' ? 'प्रोफ़ाइल फोटो अपडेट हो गइल!' : 'प्रोफ़ाइल फोटो सफलतापूर्वक अपडेट हो गई!');
+      onNotify(
+        form.isDemo
+          ? currentLang === 'en'
+            ? 'Demo preview photo updated locally (not saved to database).'
+            : 'डेमो फोटो प्रीव्यू अपडेट हुआ (डेटाबेस में खाता नहीं बनेगा)।'
+          : currentLang === 'bho'
+          ? 'प्रोफ़ाइल फोटो अपडेट हो गइल!'
+          : 'प्रोफ़ाइल फोटो सफलतापूर्वक अपडेट हो गई!'
+      );
     } catch (err: any) {
       onNotify('अपलोड विफल: ' + (err.message || 'त्रुटि'));
     } finally {
@@ -70,7 +78,15 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   const handleManualSave = () => {
     onUpdateProfile(form);
     setSaveSuccess(true);
-    onNotify(currentLang === 'bho' ? 'प्रोफ़ाइल फ़ायरबेस में सहेज दिहल गइल!' : 'प्रोफ़ाइल फ़ायरबेस में सफलतापूर्वक सुरक्षित कर ली गई!');
+    onNotify(
+      form.isDemo
+        ? currentLang === 'en'
+          ? 'Demo preview updated locally. Create an account to save permanently.'
+          : 'डेमो प्रीव्यू अपडेट हुआ। स्थायी रूप से सहेजने के लिए अपना खाता बनाएं।'
+        : currentLang === 'bho'
+        ? 'प्रोफ़ाइल फ़ायरबेस में सहेज दिहल गइल!'
+        : 'प्रोफ़ाइल फ़ायरबेस में सफलतापूर्वक सुरक्षित कर ली गई!'
+    );
     setTimeout(() => setSaveSuccess(false), 2500);
   };
 

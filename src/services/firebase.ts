@@ -156,6 +156,46 @@ export const isSubAdminUser = (user?: AppUser | null): boolean =>
 export const isAdminUser = (user?: AppUser | null): boolean =>
   Boolean(user) && (user?.role === 'admin' || user?.role === 'sub_admin' || isSuperAdminEmail(user?.email));
 
+/**
+ * True ONLY for genuinely registered users (mobile+PIN or verified email/Google account).
+ * Anonymous guests, device fallback IDs, and demo profiles NEVER pass this check.
+ */
+export const isRegisteredUser = (user?: AppUser | null): boolean =>
+  Boolean(
+    user &&
+    !user.isAnonymous &&
+    (Boolean(user.phone) || Boolean(user.email)) &&
+    !user.uid.startsWith('guest_') &&
+    !user.uid.startsWith('device_user_')
+  );
+
+/** Deterministic SHA-256 hash of (phone + PIN) so PINs are never stored in plaintext in Firestore */
+export async function hashPhonePin(rawPhone: string, rawPin: string): Promise<string> {
+  const phone = normalizePhone(rawPhone);
+  const pin = String(rawPin || '').trim();
+  const material = `jeevikaai:v1:${phone}:${pin}`;
+  try {
+    if (typeof crypto !== 'undefined' && crypto.subtle) {
+      const data = new TextEncoder().encode(material);
+      const digest = await crypto.subtle.digest('SHA-256', data);
+      return Array.from(new Uint8Array(digest))
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('');
+    }
+  } catch {}
+  // Fallback deterministic 64-bit hex hash if subtle crypto is unavailable in an insecure context
+  let h1 = 0xdeadbeef ^ material.length;
+  let h2 = 0x41c6ce57 ^ material.length;
+  for (let i = 0; i < material.length; i++) {
+    const ch = material.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return 'fb_' + (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16);
+}
+
 // --- Assisted accounts (mobile number + 4-digit PIN) -------------------------------------------
 // People who cannot manage e-mail/passwords get an account from the JeevikaAI assistant using only
 // their mobile number and a 4-digit PIN. Firebase Auth needs an e-mail and a 6+ character password,
@@ -277,6 +317,7 @@ const PHONE_ACCOUNTS_KEY = 'jeevika_phone_accounts_v1';
 interface LocalPhoneAccount {
   phone: string;
   pin: string;
+  pinHash?: string;
   name?: string;
   uid: string;
   createdAt: string;
@@ -360,7 +401,7 @@ class AuthService {
 
   /**
    * Checks whether a 10-digit mobile number is already registered in Firestore or local device storage.
-   * Also verifies if the user already has a completed AI profile or is still pending.
+   * Ignores demo/guest documents and verifies if the user already has a completed AI profile.
    */
   public async checkPhoneExists(rawPhone: string): Promise<PhoneCheckResult> {
     const phone = normalizePhone(rawPhone);
@@ -368,59 +409,13 @@ class AuthService {
       return { exists: false };
     }
 
-    // 1. Check local phone accounts first (instant)
-    try {
-      const localAccs = getLocalPhoneAccounts();
-      if (localAccs[phone]) {
-        const acc = localAccs[phone];
-        let isComplete = false;
-        let storedProf: any = null;
-        try {
-          const raw = localStorage.getItem(`jeevika_firestore_user_${acc.uid}`);
-          if (raw) storedProf = JSON.parse(raw);
-        } catch {}
-        if (storedProf && storedProf.skills && storedProf.education && storedProf.status === 'completed') {
-          isComplete = true;
-        }
-        return {
-          exists: true,
-          name: storedProf?.name || acc.name || `नागरिक (${phone.slice(-4)})`,
-          uid: acc.uid,
-          isProfileComplete: isComplete,
-          status: storedProf?.status || 'pending',
-          source: 'local'
-        };
-      }
-    } catch {}
-
-    // 2. Query Firestore users collection
+    // 1. Check Firestore users collection first so cross-device/PWA state is authoritative
     if (isRealFirebaseConfigured) {
       try {
         const db = getDb();
-        // Check by direct query
-        const q = query(collection(db, 'users'), where('phone', '==', phone));
-        const snap = await getDocs(q);
-        if (!snap.empty) {
-          const docData = snap.docs[0].data();
-          const docId = snap.docs[0].id;
-          const isComplete = Boolean(
-            docData.skills && String(docData.skills).trim().length > 2 &&
-            docData.education && String(docData.education).trim().length > 1 &&
-            docData.status === 'completed'
-          );
-          return {
-            exists: true,
-            name: docData.name || `नागरिक (${phone.slice(-4)})`,
-            uid: docId,
-            isProfileComplete: isComplete,
-            status: docData.status || (isComplete ? 'completed' : 'pending'),
-            source: 'firestore'
-          };
-        }
-
-        // Also check direct document key user_phone_{phone}
+        // Direct deterministic doc lookup first (fastest)
         const directSnap = await getDoc(doc(db, 'users', 'user_phone_' + phone));
-        if (directSnap.exists()) {
+        if (directSnap.exists() && directSnap.data()?.isDemo !== true) {
           const docData = directSnap.data();
           const isComplete = Boolean(
             docData.skills && String(docData.skills).trim().length > 2 &&
@@ -436,63 +431,151 @@ class AuthService {
             source: 'firestore'
           };
         }
+
+        // Also query by normalized phone field (covers Firebase Auth UID docs)
+        const q = query(collection(db, 'users'), where('phone', '==', phone));
+        const snap = await getDocs(q);
+        const validDoc = snap.docs.find((d) => d.data()?.isDemo !== true);
+        if (validDoc) {
+          const docData = validDoc.data();
+          const isComplete = Boolean(
+            docData.skills && String(docData.skills).trim().length > 2 &&
+            docData.education && String(docData.education).trim().length > 1 &&
+            docData.status === 'completed'
+          );
+          return {
+            exists: true,
+            name: docData.name || `नागरिक (${phone.slice(-4)})`,
+            uid: validDoc.id,
+            isProfileComplete: isComplete,
+            status: docData.status || (isComplete ? 'completed' : 'pending'),
+            source: 'firestore'
+          };
+        }
       } catch (err) {
         console.warn('Firestore phone lookup notice:', err);
       }
     }
 
+    // 2. Fallback to local phone accounts on this device (offline support)
+    try {
+      const localAccs = getLocalPhoneAccounts();
+      if (localAccs[phone]) {
+        const acc = localAccs[phone];
+        let isComplete = false;
+        let storedProf: any = null;
+        try {
+          const raw = localStorage.getItem(`jeevika_firestore_user_${acc.uid}`);
+          if (raw) storedProf = JSON.parse(raw);
+        } catch {}
+        if (storedProf && storedProf.isDemo !== true && storedProf.skills && storedProf.education && storedProf.status === 'completed') {
+          isComplete = true;
+        }
+        return {
+          exists: true,
+          name: storedProf?.name || acc.name || `नागरिक (${phone.slice(-4)})`,
+          uid: acc.uid,
+          isProfileComplete: isComplete,
+          status: storedProf?.status || 'pending',
+          source: 'local'
+        };
+      }
+    } catch {}
+
     return { exists: false };
   }
 
+  /** Helper: finds a registered user document in Firestore by normalized 10-digit phone */
+  private async findFirestoreUserByPhone(phone: string): Promise<{ id: string; data: any } | null> {
+    if (!isRealFirebaseConfigured) return null;
+    try {
+      const db = getDb();
+      const directId = 'user_phone_' + phone;
+      const directSnap = await getDoc(doc(db, 'users', directId));
+      if (directSnap.exists() && directSnap.data()?.isDemo !== true) {
+        return { id: directId, data: directSnap.data() };
+      }
+
+      const q = query(collection(db, 'users'), where('phone', '==', phone));
+      const snap = await getDocs(q);
+      const validDoc = snap.docs.find((d) => d.data()?.isDemo !== true);
+      if (validDoc) {
+        return { id: validDoc.id, data: validDoc.data() };
+      }
+    } catch (err) {
+      console.warn('Firestore phone user lookup notice:', err);
+    }
+    return null;
+  }
+
   /**
-   * Creates an account from a mobile number + PIN. If the person already has an anonymous guest session
-   * (created when their profile was first saved), the account is linked to it so nothing is lost.
-   * Resilient fallback to local storage ensures uneducated users are never blocked by network hiccups.
+   * Creates a genuinely registered account from a 10-digit mobile number + 4-digit PIN.
+   * Stores a SHA-256 pinHash in Firestore so login works reliably after logout and across devices/PWAs
+   * even when Firebase Email/Password auth is not enabled.
    */
-  public async registerWithPhone(phone: string, pin: string, name?: string): Promise<AppUser> {
+  public async registerWithPhone(rawPhone: string, rawPin: string, name?: string): Promise<AppUser> {
     await this.authReady;
+    const phone = normalizePhone(rawPhone);
+    const pin = String(rawPin || '').trim();
+    if (!isValidIndianMobile(phone) || pin.length !== 4) {
+      throw new AccountError('wrong');
+    }
+
+    // Prevent overwriting an already registered phone account
+    const existingCheck = await this.checkPhoneExists(phone);
+    if (existingCheck.exists) {
+      throw new AccountError('exists');
+    }
+
     const email = phoneToEmail(phone);
     const password = pinToPassword(phone, pin);
+    const pinHash = await hashPhonePin(phone, pin);
+    const cleanName = name && name.trim() ? name.trim() : undefined;
+    const nowIso = new Date().toISOString();
 
-    // 1. Try Firebase Auth first
+    // 1. Try Firebase Email/Password Auth if enabled on the project (never link to a random anonymous session)
     if (this.auth && isRealFirebaseConfigured) {
       try {
-        let fbUser: FirebaseUser;
-        const current = this.auth.currentUser;
-        if (current && current.isAnonymous) {
-          const res = await linkWithCredential(current, EmailAuthProvider.credential(email, password));
-          fbUser = res.user;
-        } else {
-          const res = await createUserWithEmailAndPassword(this.auth, email, password);
-          fbUser = res.user;
+        const res = await createUserWithEmailAndPassword(this.auth, email, password);
+        const fbUser = res.user;
+        if (cleanName) {
+          try { await updateProfile(fbUser, { displayName: cleanName }); } catch {}
         }
-        if (name) {
-          try { await updateProfile(fbUser, { displayName: name }); } catch (e) {}
-        }
-        const user: AppUser = { ...this.toAppUser(fbUser), displayName: name || fbUser.displayName };
+        const user: AppUser = {
+          ...this.toAppUser(fbUser),
+          displayName: cleanName || fbUser.displayName || `नागरिक (${phone.slice(-4)})`,
+          phone,
+          isAnonymous: false,
+          role: 'beneficiary',
+        };
         this.currentUser = user;
-        saveLocalPhoneAccount({ phone, pin, name: user.displayName || undefined, uid: user.uid, createdAt: new Date().toISOString() });
+        saveLocalPhoneAccount({ phone, pin, pinHash, name: user.displayName || undefined, uid: user.uid, createdAt: nowIso });
 
-        // Save initial record to Firestore users collection so admin sees live registration immediately
-        if (isRealFirebaseConfigured) {
-          try {
-            await setDoc(doc(getDb(), 'users', user.uid), clean({
-              uid: user.uid,
-              phone,
-              name: name || `नागरिक (${phone.slice(-4)})`,
-              status: 'pending',
-              education: '',
-              skills: '',
-              location: '',
-              state: 'Uttar Pradesh',
-              createdAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString(),
-              lastActive: new Date().toISOString(),
-              activeNow: true
-            }), { merge: true });
-          } catch (err) {
-            console.warn('Initial firestore user sync notice:', err);
-          }
+        const initialPayload = clean({
+          uid: user.uid,
+          phone,
+          email,
+          pinHash,
+          registered: true,
+          isDemo: false,
+          name: cleanName || `नागरिक (${phone.slice(-4)})`,
+          status: 'pending',
+          education: '',
+          skills: '',
+          location: '',
+          state: 'Uttar Pradesh',
+          createdAt: nowIso,
+          updatedAt: nowIso,
+          lastActive: nowIso,
+          activeNow: true
+        });
+        try {
+          localStorage.setItem(`jeevika_firestore_user_${user.uid}`, JSON.stringify(initialPayload));
+        } catch {}
+        try {
+          await setDoc(doc(getDb(), 'users', user.uid), initialPayload, { merge: true });
+        } catch (err) {
+          console.warn('Initial firestore user sync notice:', err);
         }
 
         this.notifyListeners();
@@ -502,112 +585,181 @@ class AuthService {
         if (code === 'auth/email-already-in-use' || code === 'auth/credential-already-in-use') {
           throw new AccountError('exists');
         }
-        console.warn('Firebase registerWithPhone notice:', err?.message || err);
+        console.warn('Firebase Email/Password auth unavailable, using Firestore-backed phone account:', code || err?.message);
       }
     }
 
-    // 2. Resilient local fallback: Create account locally so the user is never blocked
-    const existingAccounts = getLocalPhoneAccounts();
-    if (existingAccounts[phone] && existingAccounts[phone].pin !== pin) {
-      // Account exists locally with different PIN
-      throw new AccountError('exists');
-    }
-
-    const uid = existingAccounts[phone]?.uid || ('user_phone_' + phone);
+    // 2. Deterministic Firestore-backed phone account (works reliably across web, PWA & restarts)
+    const uid = 'user_phone_' + phone;
     const localUser: AppUser = {
       uid,
       email,
-      displayName: name || `नागरिक (${phone.slice(-4)})`,
+      displayName: cleanName || `नागरिक (${phone.slice(-4)})`,
       isAnonymous: false,
       role: 'beneficiary',
       phone,
       isLocal: true
     };
-    saveLocalPhoneAccount({ phone, pin, name: localUser.displayName || undefined, uid, createdAt: new Date().toISOString() });
 
-    // Save initial record locally & attempt cloud save
+    const initialPayload = clean({
+      uid,
+      phone,
+      email,
+      pinHash,
+      registered: true,
+      isDemo: false,
+      name: cleanName || `नागरिक (${phone.slice(-4)})`,
+      status: 'pending',
+      education: '',
+      skills: '',
+      location: '',
+      state: 'Uttar Pradesh',
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      lastActive: nowIso,
+      activeNow: true
+    });
+
+    saveLocalPhoneAccount({ phone, pin, pinHash, name: localUser.displayName || undefined, uid, createdAt: nowIso });
     try {
-      const initialPayload = clean({
-        uid,
-        phone,
-        name: name || `नागरिक (${phone.slice(-4)})`,
-        status: 'pending',
-        education: '',
-        skills: '',
-        location: '',
-        state: 'Uttar Pradesh',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        lastActive: new Date().toISOString(),
-        activeNow: true
-      });
       localStorage.setItem(`jeevika_firestore_user_${uid}`, JSON.stringify(initialPayload));
-      if (isRealFirebaseConfigured) {
-        setDoc(doc(getDb(), 'users', uid), initialPayload, { merge: true }).catch(() => {});
-      }
     } catch {}
+    if (isRealFirebaseConfigured) {
+      try {
+        await setDoc(doc(getDb(), 'users', uid), initialPayload, { merge: true });
+      } catch (err) {
+        console.warn('Firestore registered phone account save notice:', err);
+      }
+    }
 
     this.currentUser = localUser;
     this.notifyListeners();
     return localUser;
   }
 
-  public async loginWithPhone(phone: string, pin: string): Promise<AppUser> {
+  /**
+   * Logs in a registered citizen using their 10-digit mobile number + 4-digit PIN.
+   * Verifies via Firebase Auth first, then Firestore pinHash (cross-device), then local phone store.
+   */
+  public async loginWithPhone(rawPhone: string, rawPin: string): Promise<AppUser> {
     await this.authReady;
+    const phone = normalizePhone(rawPhone);
+    const pin = String(rawPin || '').trim();
+    if (!isValidIndianMobile(phone) || pin.length !== 4) {
+      throw new AccountError('wrong');
+    }
+
     const email = phoneToEmail(phone);
     const password = pinToPassword(phone, pin);
+    const pinHash = await hashPhonePin(phone, pin);
 
-    // 1. Try real Firebase Auth first
+    // 1. Try Firebase Email/Password Auth first (if account was created in Firebase Auth)
     if (this.auth && isRealFirebaseConfigured) {
       try {
         const res = await signInWithEmailAndPassword(this.auth, email, password);
-        const user = this.toAppUser(res.user);
+        const user: AppUser = {
+          ...this.toAppUser(res.user),
+          phone,
+          isAnonymous: false,
+          role: 'beneficiary',
+        };
         this.currentUser = user;
-        saveLocalPhoneAccount({ phone, pin, name: user.displayName || undefined, uid: user.uid, createdAt: new Date().toISOString() });
+        saveLocalPhoneAccount({ phone, pin, pinHash, name: user.displayName || undefined, uid: user.uid, createdAt: new Date().toISOString() });
+        // Ensure pinHash & registered flag exist on Firestore doc for seamless future logins
+        try {
+          await setDoc(
+            doc(getDb(), 'users', user.uid),
+            clean({ uid: user.uid, phone, pinHash, registered: true, isDemo: false, lastActive: new Date().toISOString(), activeNow: true }),
+            { merge: true }
+          );
+        } catch {}
         this.notifyListeners();
         return user;
       } catch (err: any) {
-        const code: string = err?.code || '';
-        if (
-          code === 'auth/invalid-credential' ||
-          code === 'auth/wrong-password' ||
-          code === 'auth/invalid-login-credentials'
-        ) {
-          // Check if user has local matching pin before failing
-          const accounts = getLocalPhoneAccounts();
-          if (accounts[phone] && accounts[phone].pin === pin) {
-            const localUser: AppUser = {
-              uid: accounts[phone].uid,
-              email,
-              displayName: accounts[phone].name || `User ${phone.slice(-4)}`,
-              isAnonymous: false,
-              role: 'beneficiary',
-              phone,
-              isLocal: true
-            };
-            this.currentUser = localUser;
-            this.notifyListeners();
-            return localUser;
-          }
-          throw new AccountError('wrong');
-        }
-        console.warn('Firebase loginWithPhone notice:', err?.message || err);
+        console.warn('Firebase Auth phone login fallback to Firestore/local verification:', err?.code || err?.message);
       }
     }
 
-    // 2. Resilient local fallback: Check local device accounts
-    const accounts = getLocalPhoneAccounts();
-    if (accounts[phone]) {
-      if (accounts[phone].pin === pin) {
-        const localUser: AppUser = {
-          uid: accounts[phone].uid,
+    // 2. Verify against Firestore registered user record (works after logout & across devices/PWA)
+    const firestoreMatch = await this.findFirestoreUserByPhone(phone);
+    if (firestoreMatch) {
+      const { id: docUid, data } = firestoreMatch;
+      const storedHash = typeof data?.pinHash === 'string' ? data.pinHash : '';
+      const localAccs = getLocalPhoneAccounts();
+      const localMatch = localAccs[phone];
+
+      if (storedHash) {
+        if (storedHash === pinHash) {
+          const user: AppUser = {
+            uid: docUid,
+            email,
+            displayName: data?.name || localMatch?.name || `नागरिक (${phone.slice(-4)})`,
+            isAnonymous: false,
+            role: 'beneficiary',
+            phone,
+            isLocal: true
+          };
+          saveLocalPhoneAccount({
+            phone,
+            pin,
+            pinHash,
+            name: user.displayName || undefined,
+            uid: docUid,
+            createdAt: data?.createdAt || new Date().toISOString(),
+          });
+          this.currentUser = user;
+          this.notifyListeners();
+          return user;
+        }
+        // Stored pinHash exists and did NOT match -> definitely wrong PIN
+        throw new AccountError('wrong');
+      }
+
+      // Legacy Firestore record created before pinHash was added: verify against local PIN store if present
+      if (localMatch && (localMatch.pin === pin || localMatch.pinHash === pinHash)) {
+        const user: AppUser = {
+          uid: docUid,
           email,
-          displayName: accounts[phone].name || `User ${phone.slice(-4)}`,
+          displayName: data?.name || localMatch.name || `नागरिक (${phone.slice(-4)})`,
           isAnonymous: false,
           role: 'beneficiary',
           phone,
           isLocal: true
         };
+        // Backfill pinHash to Firestore so future cross-device logins work seamlessly
+        try {
+          await setDoc(doc(getDb(), 'users', docUid), clean({ pinHash, registered: true, isDemo: false }), { merge: true });
+        } catch {}
+        saveLocalPhoneAccount({ phone, pin, pinHash, name: user.displayName || undefined, uid: docUid, createdAt: data?.createdAt || localMatch.createdAt });
+        this.currentUser = user;
+        this.notifyListeners();
+        return user;
+      }
+
+      throw new AccountError('wrong');
+    }
+
+    // 3. Offline / local phone store fallback
+    const accounts = getLocalPhoneAccounts();
+    if (accounts[phone]) {
+      const acc = accounts[phone];
+      if (acc.pin === pin || (acc.pinHash && acc.pinHash === pinHash)) {
+        const localUser: AppUser = {
+          uid: acc.uid,
+          email,
+          displayName: acc.name || `नागरिक (${phone.slice(-4)})`,
+          isAnonymous: false,
+          role: 'beneficiary',
+          phone,
+          isLocal: true
+        };
+        if (isRealFirebaseConfigured) {
+          setDoc(
+            doc(getDb(), 'users', acc.uid),
+            clean({ uid: acc.uid, phone, email, pinHash, registered: true, isDemo: false, lastActive: new Date().toISOString() }),
+            { merge: true }
+          ).catch(() => {});
+        }
         this.currentUser = localUser;
         this.notifyListeners();
         return localUser;
@@ -615,28 +767,67 @@ class AuthService {
       throw new AccountError('wrong');
     }
 
-    // If no local account and Firebase failed, check if device UID exists
-    const savedLocal = localStorage.getItem(LOCAL_USER_KEY);
-    if (savedLocal) {
-      try {
-        const parsed = JSON.parse(savedLocal) as AppUser;
-        if (parsed && (parsed.phone === phone || !parsed.phone)) {
-          const user: AppUser = {
-            ...parsed,
-            phone,
-            isAnonymous: false,
-            role: 'beneficiary',
-            isLocal: true
-          };
-          this.currentUser = user;
-          saveLocalPhoneAccount({ phone, pin, name: user.displayName || undefined, uid: user.uid, createdAt: new Date().toISOString() });
-          this.notifyListeners();
-          return user;
-        }
-      } catch {}
+    throw new AccountError('wrong');
+  }
+
+  /** Resets the 4-digit PIN for an existing registered phone account without losing saved profile data */
+  public async resetPhonePin(rawPhone: string, rawNewPin: string): Promise<AppUser> {
+    await this.authReady;
+    const phone = normalizePhone(rawPhone);
+    const newPin = String(rawNewPin || '').trim();
+    if (!isValidIndianMobile(phone) || newPin.length !== 4) {
+      throw new AccountError('wrong');
     }
 
-    throw new AccountError('wrong');
+    const pinHash = await hashPhonePin(phone, newPin);
+    const email = phoneToEmail(phone);
+    const firestoreMatch = await this.findFirestoreUserByPhone(phone);
+    const localAccs = getLocalPhoneAccounts();
+    const uid = firestoreMatch?.id || localAccs[phone]?.uid || ('user_phone_' + phone);
+    const displayName = firestoreMatch?.data?.name || localAccs[phone]?.name || `नागरिक (${phone.slice(-4)})`;
+
+    if (isRealFirebaseConfigured) {
+      try {
+        await setDoc(
+          doc(getDb(), 'users', uid),
+          clean({
+            uid,
+            phone,
+            email,
+            pinHash,
+            registered: true,
+            isDemo: false,
+            updatedAt: new Date().toISOString(),
+            lastActive: new Date().toISOString(),
+          }),
+          { merge: true }
+        );
+      } catch (err) {
+        console.warn('Firestore PIN reset sync notice:', err);
+      }
+    }
+
+    saveLocalPhoneAccount({
+      phone,
+      pin: newPin,
+      pinHash,
+      name: displayName,
+      uid,
+      createdAt: firestoreMatch?.data?.createdAt || localAccs[phone]?.createdAt || new Date().toISOString(),
+    });
+
+    const user: AppUser = {
+      uid,
+      email,
+      displayName,
+      isAnonymous: false,
+      role: 'beneficiary',
+      phone,
+      isLocal: true,
+    };
+    this.currentUser = user;
+    this.notifyListeners();
+    return user;
   }
 
   private init() {
@@ -665,6 +856,11 @@ class AuthService {
 
         onAuthStateChanged(this.auth, async (fbUser: FirebaseUser | null) => {
           if (fbUser) {
+            // Never let a Firebase anonymous session overwrite an already signed-in registered phone user
+            if (fbUser.isAnonymous && isRegisteredUser(this.currentUser)) {
+              this.resolveReady();
+              return;
+            }
             this.currentUser = await this.resolveAppUser(fbUser);
           } else if (!this.currentUser?.isLocal) {
             this.currentUser = null;
@@ -1040,17 +1236,25 @@ export function computeAdminUserRecord(data: any, docId: string): AdminUserRecor
   };
 }
 
-// Firestore User Profile Sync
+// Firestore User Profile Sync (STRICTLY REGISTERED USERS ONLY — ZERO DEMO/GUEST WRITES)
 export const firestoreService = {
   /**
-   * Saves the profile under users/{uid}. Cloud writes only happen for a real Firebase session
-   * (signed-in or anonymous guest) because firestore.rules require request.auth.uid == userId.
-   * Without one, the profile stays on the device.
+   * Saves a profile under users/{uid} ONLY when a genuinely registered user is logged in
+   * and the profile is NOT demo data. Demo data, guest Roadmap visits, and demo photo uploads
+   * NEVER create accounts or write to Firestore /users.
    */
   async syncLocalProfileToFirestore(profile: BeneficiaryProfile): Promise<string> {
-    const cloudUid = await authService.ensureCloudUid();
-    const uid = authService.getCurrentUser()?.uid || cloudUid || deviceUid();
-    await this.saveUserProfile(uid, profile, true, true);
+    const currentUser = authService.getCurrentUser();
+    if (!isRegisteredUser(currentUser) || !currentUser || profile?.isDemo === true) {
+      return '';
+    }
+    const uid = currentUser.uid;
+    const normalizedProfile: BeneficiaryProfile = {
+      ...profile,
+      phone: currentUser.phone || profile.phone,
+      isDemo: false,
+    };
+    await this.saveUserProfile(uid, normalizedProfile, true, true);
     return uid;
   },
 
@@ -1060,18 +1264,25 @@ export const firestoreService = {
     consentSaved: boolean = true,
     cloudAllowed: boolean = true
   ) {
+    // Hard guard: never write demo, guest, or anonymous device profiles to Firestore /users
+    if (!uid || profile?.isDemo === true || uid.startsWith('guest_') || uid.startsWith('device_user_')) {
+      return false;
+    }
+
     const isComplete = Boolean(
       profile.name && profile.name.trim() && !profile.name.toLowerCase().startsWith('user') &&
       profile.skills && profile.skills.trim() &&
       profile.location && profile.location.trim() &&
       profile.education && profile.education.trim()
     );
-    const phone = profile.phone || authService.getCurrentUser()?.phone;
+    const phone = normalizePhone(profile.phone || authService.getCurrentUser()?.phone || '') || undefined;
 
     const payload = clean({
       ...profile,
       uid,
-      phone: phone || profile.phone || undefined,
+      phone,
+      isDemo: false,
+      registered: true,
       status: isComplete ? 'completed' : 'pending',
       consentSaved,
       updatedAt: new Date().toISOString(),
@@ -1079,12 +1290,12 @@ export const firestoreService = {
       activeNow: true
     });
 
-    // 1. Always update local storage first so offline experience is immediate
+    // 1. Update local storage cache for this registered UID
     try {
       localStorage.setItem(`jeevika_firestore_user_${uid}`, JSON.stringify(payload));
     } catch (e) {}
 
-    // 2. Persist to real Firebase Firestore
+    // 2. Persist to real Firebase Firestore (merge: true preserves pinHash & createdAt)
     if (isRealFirebaseConfigured && cloudAllowed) {
       try {
         await setDoc(doc(getDb(), 'users', uid), payload, { merge: true });
@@ -1099,10 +1310,12 @@ export const firestoreService = {
   },
 
   async getUserProfile(uid: string): Promise<BeneficiaryProfile | null> {
+    if (!uid || uid.startsWith('guest_') || uid.startsWith('device_user_')) return null;
+
     if (isRealFirebaseConfigured) {
       try {
         const snap = await getDoc(doc(getDb(), 'users', uid));
-        if (snap.exists()) {
+        if (snap.exists() && snap.data()?.isDemo !== true) {
           return snap.data() as BeneficiaryProfile;
         }
       } catch (e: any) {
@@ -1112,25 +1325,83 @@ export const firestoreService = {
 
     try {
       const data = localStorage.getItem(`jeevika_firestore_user_${uid}`);
-      return data ? JSON.parse(data) : null;
+      if (!data) return null;
+      const parsed = JSON.parse(data) as BeneficiaryProfile;
+      return parsed?.isDemo === true ? null : parsed;
     } catch (e) {
       return null;
     }
   },
 
+  /** Looks up a registered user's saved profile by normalized 10-digit phone number */
+  async getUserProfileByPhone(rawPhone: string): Promise<{ uid: string; profile: BeneficiaryProfile } | null> {
+    const phone = normalizePhone(rawPhone);
+    if (!isValidIndianMobile(phone)) return null;
+
+    if (isRealFirebaseConfigured) {
+      try {
+        const db = getDb();
+        const directId = 'user_phone_' + phone;
+        const directSnap = await getDoc(doc(db, 'users', directId));
+        if (directSnap.exists() && directSnap.data()?.isDemo !== true) {
+          return { uid: directId, profile: directSnap.data() as BeneficiaryProfile };
+        }
+        const q = query(collection(db, 'users'), where('phone', '==', phone));
+        const snap = await getDocs(q);
+        const validDoc = snap.docs.find((d) => d.data()?.isDemo !== true);
+        if (validDoc) {
+          return { uid: validDoc.id, profile: validDoc.data() as BeneficiaryProfile };
+        }
+      } catch (e: any) {
+        console.warn('Firestore phone profile fetch notice:', e?.code || e?.message || e);
+      }
+    }
+
+    try {
+      const acc = getLocalPhoneAccounts()[phone];
+      if (acc) {
+        const raw = localStorage.getItem(`jeevika_firestore_user_${acc.uid}`);
+        if (raw) {
+          const parsed = JSON.parse(raw) as BeneficiaryProfile;
+          if (parsed && parsed.isDemo !== true) {
+            return { uid: acc.uid, profile: parsed };
+          }
+        }
+      }
+    } catch {}
+
+    return null;
+  },
+
   /**
-   * Retrieves all live user accounts from Firestore, local phone registration store, and device state.
-   * Strips out duplicate accounts and returns clean, unified AdminUserRecord array.
+   * Retrieves ONLY genuinely registered user accounts from Firestore and local phone registration store.
+   * Filters out any demo, guest, or unregistered device entries.
    */
   async getAllUsers(): Promise<AdminUserRecord[]> {
     const userMap = new Map<string, AdminUserRecord>();
 
-    // 1. Query Firestore users collection
+    // 1. Query Firestore users collection (strictly registered users only)
     if (isRealFirebaseConfigured) {
       try {
         const snap = await getDocs(collection(getDb(), 'users'));
         snap.forEach((d) => {
-          const rec = computeAdminUserRecord(d.data(), d.id);
+          const data = d.data();
+          const docId = d.id;
+          // Exclude demo, guest, or unregistered device-only entries
+          if (
+            data?.isDemo === true ||
+            docId.startsWith('device_user_') ||
+            docId.startsWith('guest_')
+          ) {
+            return;
+          }
+          const hasPhoneOrEmail =
+            Boolean(data?.phone) ||
+            Boolean(data?.email) ||
+            docId.startsWith('user_phone_');
+          if (!hasPhoneOrEmail) return;
+
+          const rec = computeAdminUserRecord(data, docId);
           userMap.set(rec.uid, rec);
         });
       } catch (e: any) {
@@ -1148,6 +1419,7 @@ export const firestoreService = {
           const raw = localStorage.getItem(`jeevika_firestore_user_${acc.uid}`);
           if (raw) prof = JSON.parse(raw);
         } catch {}
+        if (prof?.isDemo === true) prof = null;
         const merged = {
           ...prof,
           uid: acc.uid,
@@ -1159,28 +1431,12 @@ export const firestoreService = {
         if (!userMap.has(acc.uid)) {
           userMap.set(acc.uid, rec);
         } else {
-          // If firestore doc was incomplete but local has phone, ensure phone is set
           const existing = userMap.get(acc.uid)!;
           if (!existing.phone && acc.phone) {
             existing.phone = acc.phone;
           }
         }
       });
-    } catch {}
-
-    // 3. Merge active session profile if available
-    try {
-      const liveProfRaw = localStorage.getItem('jeevika_profile_v2');
-      if (liveProfRaw) {
-        const p = JSON.parse(liveProfRaw);
-        const currUid = authService.getCurrentUser()?.uid || 'device_active_user';
-        if (p && (p.name || p.phone)) {
-          const rec = computeAdminUserRecord({ ...p, uid: currUid, activeNow: true }, currUid);
-          if (!userMap.has(currUid)) {
-            userMap.set(currUid, rec);
-          }
-        }
-      }
     } catch {}
 
     return Array.from(userMap.values()).sort((a, b) => {
