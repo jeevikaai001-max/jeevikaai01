@@ -18,6 +18,8 @@ interface NavbarProps {
   onStartVoiceAssessment?: () => void;
   onOpenAdminLogin?: () => void;
   onOpenAccount?: (mode: 'create' | 'login') => void;
+  isDarkMode?: boolean;
+  onToggleDarkMode?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -32,6 +34,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   onStartVoiceAssessment,
   onOpenAdminLogin,
   onOpenAccount,
+  isDarkMode = false,
+  onToggleDarkMode,
 }) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [langMenuOpen, setLangMenuOpen] = useState(false);
@@ -152,6 +156,23 @@ export const Navbar: React.FC<NavbarProps> = ({
               >
                 <Icon name="download" size={14} />
                 <span>Install</span>
+              </button>
+            )}
+
+            {onToggleDarkMode && (
+              <button
+                type="button"
+                onClick={onToggleDarkMode}
+                aria-label={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+                title={isDarkMode ? 'लाइट मोड (Light Mode)' : 'डार्क मोड (Dark Mode)'}
+                className="min-h-[38px] px-2.5 py-1.5 rounded-xl border border-[#DCE3EA] bg-white text-[#17365D] hover:border-[#245A91] transition-colors flex items-center gap-1.5 flex-shrink-0 text-xs font-bold"
+              >
+                <Icon
+                  name={isDarkMode ? 'sun' : 'moon'}
+                  size={15}
+                  className={isDarkMode ? 'text-[#F4B966]' : 'text-[#245A91]'}
+                />
+                <span className="hidden xl:inline">{isDarkMode ? 'Light' : 'Dark'}</span>
               </button>
             )}
 

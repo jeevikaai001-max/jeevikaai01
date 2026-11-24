@@ -3,6 +3,8 @@ import type { Request, Response } from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import fs from 'fs';
+import os from 'os';
 import { GoogleGenAI } from '@google/genai';
 
 dotenv.config();
@@ -755,6 +757,146 @@ Return ONLY valid JSON matching this structure without markdown formatting:
       error: 'Using verified curated district dataset',
     });
   }
+});
+
+const STORE_FILE = path.join(os.tmpdir(), 'jeevika_media_showcase_store.json');
+
+interface ServerStoreData {
+  media: any[];
+  showcase: any[];
+}
+
+function readServerStore(): ServerStoreData {
+  try {
+    if (fs.existsSync(STORE_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(STORE_FILE, 'utf8'));
+      return {
+        media: Array.isArray(parsed?.media) ? parsed.media : [],
+        showcase: Array.isArray(parsed?.showcase) ? parsed.showcase : [],
+      };
+    }
+  } catch {}
+  return { media: [], showcase: [] };
+}
+
+function writeServerStore(data: ServerStoreData) {
+  try {
+    fs.writeFileSync(STORE_FILE, JSON.stringify(data, null, 2), 'utf8');
+  } catch (err) {
+    console.warn('Could not persist server media store:', err);
+  }
+}
+
+// Media Assets API (Cross-session persistence mirror when Firestore rules are restricted/offline)
+app.get('/api/media', (_req: Request, res: Response) => {
+  const store = readServerStore();
+  res.json({ items: store.media });
+});
+
+app.post('/api/media', (req: Request, res: Response) => {
+  const body = req.body || {};
+  const url = typeof body.url === 'string' ? body.url.trim().slice(0, 1000) : '';
+  const name = typeof body.name === 'string' ? body.name.trim().slice(0, 200) : 'Untitled';
+  const folder = typeof body.folder === 'string' ? body.folder.trim().slice(0, 64) : 'banner';
+  if (!url) {
+    return res.status(400).json({ error: 'Valid image url is required' });
+  }
+  const store = readServerStore();
+  const id = typeof body.id === 'string' && body.id.trim() ? body.id.trim().slice(0, 128) : `srv_media_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const record = {
+    id,
+    url,
+    folder,
+    name: name || 'Untitled',
+    tags: Array.isArray(body.tags) ? body.tags.map((t: any) => String(t).slice(0, 60)).slice(0, 12) : ['जीविका अवसर'],
+    used: typeof body.used === 'number' ? body.used : 1,
+    time: typeof body.time === 'number' ? body.time : Date.now(),
+    createdAt: typeof body.createdAt === 'string' ? body.createdAt : new Date().toISOString(),
+    ctaUrl: typeof body.ctaUrl === 'string' && body.ctaUrl.trim() ? body.ctaUrl.trim().slice(0, 500) : undefined,
+    ctaLabel: typeof body.ctaLabel === 'string' && body.ctaLabel.trim() ? body.ctaLabel.trim().slice(0, 100) : undefined,
+    order: typeof body.order === 'number' ? body.order : 0,
+    active: body.active !== false,
+  };
+  const filtered = store.media.filter((m) => m.id !== id && m.url !== url);
+  store.media = [record, ...filtered];
+  writeServerStore(store);
+  return res.json({ item: record });
+});
+
+app.post('/api/media/reorder', (req: Request, res: Response) => {
+  const items = Array.isArray(req.body?.items) ? req.body.items : [];
+  const orderMap = new Map<string, number>();
+  for (const it of items) {
+    if (it && typeof it.id === 'string' && typeof it.order === 'number') {
+      orderMap.set(it.id, it.order);
+    }
+  }
+  const store = readServerStore();
+  store.media = store.media.map((m) => (orderMap.has(m.id) ? { ...m, order: orderMap.get(m.id)! } : m));
+  writeServerStore(store);
+  return res.json({ ok: true });
+});
+
+app.patch('/api/media/:id', (req: Request, res: Response) => {
+  const id = String(req.params.id || '').trim();
+  const patch = req.body || {};
+  const store = readServerStore();
+  let updated: any = null;
+  store.media = store.media.map((m) => {
+    if (m.id === id) {
+      updated = {
+        ...m,
+        ...(typeof patch.url === 'string' ? { url: patch.url.trim().slice(0, 1000) } : {}),
+        ...(typeof patch.folder === 'string' ? { folder: patch.folder.trim().slice(0, 64) } : {}),
+        ...(typeof patch.name === 'string' ? { name: patch.name.trim().slice(0, 200) } : {}),
+        ...(patch.ctaUrl !== undefined ? { ctaUrl: typeof patch.ctaUrl === 'string' && patch.ctaUrl.trim() ? patch.ctaUrl.trim().slice(0, 500) : undefined } : {}),
+        ...(patch.ctaLabel !== undefined ? { ctaLabel: typeof patch.ctaLabel === 'string' && patch.ctaLabel.trim() ? patch.ctaLabel.trim().slice(0, 100) : undefined } : {}),
+        ...(typeof patch.order === 'number' ? { order: patch.order } : {}),
+        ...(typeof patch.active === 'boolean' ? { active: patch.active } : {}),
+      };
+      return updated;
+    }
+    return m;
+  });
+  writeServerStore(store);
+  return res.json({ ok: true, item: updated });
+});
+
+app.delete('/api/media/:id', (req: Request, res: Response) => {
+  const id = String(req.params.id || '').trim();
+  const store = readServerStore();
+  store.media = store.media.filter((m) => m.id !== id);
+  writeServerStore(store);
+  return res.json({ ok: true });
+});
+
+// Showcase Products API
+app.get('/api/showcase', (_req: Request, res: Response) => {
+  const store = readServerStore();
+  res.json({ items: store.showcase });
+});
+
+app.post('/api/showcase', (req: Request, res: Response) => {
+  const body = req.body || {};
+  const title = typeof body.title === 'string' ? body.title.trim().slice(0, 200) : '';
+  const imageUrl = typeof body.imageUrl === 'string' ? body.imageUrl.trim().slice(0, 1000) : '';
+  if (!title || !imageUrl) {
+    return res.status(400).json({ error: 'title and imageUrl are required' });
+  }
+  const store = readServerStore();
+  const id = typeof body.id === 'string' && body.id.trim() ? body.id.trim().slice(0, 128) : `srv_show_${Date.now()}`;
+  const record = { ...body, id, title, imageUrl };
+  store.showcase = [record, ...store.showcase.filter((p) => p.id !== id)];
+  writeServerStore(store);
+  return res.json({ item: record });
+});
+
+app.delete('/api/showcase/:id', (req: Request, res: Response) => {
+  const id = String(req.params.id || '').trim();
+  const store = readServerStore();
+  store.showcase = store.showcase.filter((p) => p.id !== id);
+  writeServerStore(store);
+  return res.json({ ok: true });
 });
 
 // Setup Vite middleware in dev or static files in production

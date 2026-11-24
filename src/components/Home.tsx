@@ -1,12 +1,18 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Icon } from './Icons';
 import { DEMO, PATHWAYS } from '../data/mockData';
 import { evaluatePathway, rankJobs } from '../services/recommendationEngine';
-import { AppView, SupportedLanguage } from '../types';
+import { AppView, GovernmentScheme, SupportedLanguage } from '../types';
 import { PWAInstallStatusButton } from './PWAInstallStatusButton';
 import { HeroCarousel } from './HeroCarousel';
 import { SkillTrainingGallery } from './SkillTrainingGallery';
 import { LocalBusinessShowcase } from './LocalBusinessShowcase';
+import { SchemeCard } from './SchemeCard';
+import {
+  mediaStorageService,
+  buildGeneralSchemeMedia,
+  toGovernmentSchemeFromMedia,
+} from '../services/cloudinaryService';
 
 interface HomeProps {
   go: (view: AppView | string, sectionId?: string) => void;
@@ -34,6 +40,20 @@ export const Home: React.FC<HomeProps> = ({
   userLocation,
 }) => {
   const [activeFaqIndex, setActiveFaqIndex] = useState<number | null>(null);
+  const [uploadedSchemes, setUploadedSchemes] = useState<GovernmentScheme[]>([]);
+
+  useEffect(() => {
+    let isMounted = true;
+    const unsub = mediaStorageService.subscribeMediaAssets((assets) => {
+      if (!isMounted) return;
+      const items = buildGeneralSchemeMedia(assets).map(toGovernmentSchemeFromMedia);
+      setUploadedSchemes(items);
+    });
+    return () => {
+      isMounted = false;
+      unsub();
+    };
+  }, []);
 
   const previewPaths = PATHWAYS.map((p) => evaluatePathway(p, DEMO)).sort((a, b) => b.score - a.score);
   const previewJobs = rankJobs(DEMO, previewPaths).slice(0, 3);
@@ -289,6 +309,44 @@ export const Home: React.FC<HomeProps> = ({
           </div>
         </div>
       </section>
+
+      {/* 2B. Admin-Uploaded Schemes & General Announcements (renders live whenever uploaded) */}
+      {uploadedSchemes.length > 0 && (
+        <section className="py-10 bg-[#F7F9FC] border-b border-[#DCE3EA]" id="home-schemes">
+          <div className="max-w-6xl mx-auto px-4 sm:px-6 space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+              <div>
+                <div className="inline-flex items-center gap-1.5 text-xs font-bold text-[#287D73] uppercase tracking-wider mb-1">
+                  <Icon name="shieldCheck" size={14} />
+                  <span>सरकारी योजनाएं व विशेष सूचनाएं · Schemes &amp; Updates</span>
+                </div>
+                <h2 className="text-2xl sm:text-3xl font-extrabold text-[#17365D] tracking-tight font-['Bricolage_Grotesque']">
+                  नवीनतम सरकारी योजनाएं एवं जन-कल्याण अपडेट
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => go('opportunities')}
+                className="inline-flex items-center gap-2 min-h-[42px] px-4 py-2 rounded-xl border border-[#DCE3EA] hover:border-[#17365D] bg-white font-bold text-xs text-[#17365D] transition-colors flex-shrink-0"
+              >
+                <span>सभी योजनाएं व रोजगार देखें</span>
+                <Icon name="arrowR" size={14} />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
+              {uploadedSchemes.map((scheme) => (
+                <SchemeCard
+                  key={scheme.id}
+                  scheme={scheme}
+                  lang={currentLang}
+                  onNavigate={go}
+                />
+              ))}
+            </div>
+          </div>
+        </section>
+      )}
 
       {/* 3. How JeevikaAI Works & Methodology */}
       <section className="py-14 bg-[#F7F9FC] border-b border-[#DCE3EA]">

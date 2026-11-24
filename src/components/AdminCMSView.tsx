@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Icon } from './Icons';
 import { Opportunity, Pathway, AppView, MediaAssetRecord, ShowcaseProduct } from '../types';
 import { JOBS, PATHWAYS } from '../data/mockData';
@@ -73,6 +73,8 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
   const [mediaCtaLabel, setMediaCtaLabel] = useState('');
   const [editingMediaId, setEditingMediaId] = useState<string | null>(null);
   const [mediaCategoryFilter, setMediaCategoryFilter] = useState<string>('all');
+  const [mediaStatusNotice, setMediaStatusNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [opportunities, setOpportunities] = useState<Opportunity[]>(() => {
     try {
@@ -325,7 +327,8 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
         mediaCategoryFilter === 'any' ||
         mediaCategoryFilter === 'all' ||
         m.folder === mediaCategoryFilter ||
-        (mediaCategoryFilter === 'banner' && m.folder === 'hero_banner');
+        (mediaCategoryFilter === 'banner' && m.folder === 'hero_banner') ||
+        (mediaCategoryFilter === 'general' && (m.folder === 'schemes' || m.folder === 'scheme'));
       const matchSearch =
         !searchQuery.trim() ||
         m.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -333,11 +336,12 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
       return matchCat && matchSearch;
     });
 
-    if (mediaCategoryFilter === 'banner') {
+    if (mediaCategoryFilter === 'banner' || mediaCategoryFilter === 'general') {
       return [...list].sort((a, b) => {
         const orderA = typeof a.order === 'number' ? a.order : 999;
         const orderB = typeof b.order === 'number' ? b.order : 999;
-        return orderA - orderB;
+        if (orderA !== orderB) return orderA - orderB;
+        return (b.time || 0) - (a.time || 0);
       });
     }
     return list;
@@ -349,7 +353,19 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
       .sort((a, b) => {
         const orderA = typeof a.order === 'number' ? a.order : 999;
         const orderB = typeof b.order === 'number' ? b.order : 999;
-        return orderA - orderB;
+        if (orderA !== orderB) return orderA - orderB;
+        return (b.time || 0) - (a.time || 0);
+      });
+  }, [mediaAssets]);
+
+  const generalSchemeAssets = useMemo(() => {
+    return mediaAssets
+      .filter((m) => m.folder === 'general' || m.folder === 'schemes' || m.folder === 'scheme')
+      .sort((a, b) => {
+        const orderA = typeof a.order === 'number' ? a.order : 999;
+        const orderB = typeof b.order === 'number' ? b.order : 999;
+        if (orderA !== orderB) return orderA - orderB;
+        return (b.time || 0) - (a.time || 0);
       });
   }, [mediaAssets]);
 
@@ -568,17 +584,55 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
     onNotify('Live user assessment registry exported as CSV!');
   };
 
+  const resetMediaForm = () => {
+    mediaPreviews.forEach((u) => {
+      if (u.startsWith('blob:')) {
+        try { URL.revokeObjectURL(u); } catch {}
+      }
+    });
+    if (mediaPreview && mediaPreview.startsWith('blob:')) {
+      try { URL.revokeObjectURL(mediaPreview); } catch {}
+    }
+    setMediaFile(null);
+    setMediaFiles([]);
+    setMediaPreview('');
+    setMediaPreviews([]);
+    setMediaDirectUrl('');
+    setMediaTitle('');
+    setMediaCtaUrl('');
+    setMediaCtaLabel('');
+    setUploadBatchStatus('');
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
   const handleUploadNewMedia = async (e: React.FormEvent) => {
     e.preventDefault();
+    setMediaStatusNotice(null);
+
     if (!mediaTitle.trim()) {
       onNotify('कृपया शीर्षक दर्ज करें।');
+      setMediaStatusNotice({ type: 'error', text: 'कृपया शीर्षक (Title / Caption) दर्ज करें।' });
       return;
     }
 
     if (!editingMediaId && !mediaFile && mediaFiles.length === 0 && !mediaDirectUrl.trim() && !mediaPreview) {
-      onNotify('कृपया अपलोड करने के लिए एक या अधिक तस्वीरें चुनें अथवा इमेज URL दर्ज करें।');
+      const msg = 'कृपया अपलोड करने के लिए एक या अधिक तस्वीरें चुनें अथवा इमेज URL दर्ज करें।';
+      onNotify(msg);
+      setMediaStatusNotice({ type: 'error', text: msg });
       return;
     }
+
+    const matchesSameGroup = (folder: string) => {
+      if (mediaFolder === 'banner' || mediaFolder === 'hero_banner') {
+        return folder === 'banner' || folder === 'hero_banner';
+      }
+      if (mediaFolder === 'general' || mediaFolder === 'schemes' || mediaFolder === 'scheme') {
+        return folder === 'general' || folder === 'schemes' || folder === 'scheme';
+      }
+      return folder === mediaFolder;
+    };
 
     setMediaUploading(true);
     setMediaUploadProgress(10);
@@ -599,18 +653,20 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
           ctaUrl: mediaCtaUrl.trim() || undefined,
           ctaLabel: mediaCtaLabel.trim() || undefined,
         });
-        onNotify('मीडिया सफलतापूर्वक अपडेट किया गया! (Media updated)');
+        const msg = 'मीडिया सफलतापूर्वक अपडेट किया गया!';
+        onNotify(msg);
+        setMediaStatusNotice({ type: 'success', text: msg });
         setEditingMediaId(null);
       } else if (mediaFiles.length > 0) {
         const total = mediaFiles.length;
-        const currentCategoryAssets = mediaAssets.filter((m) => m.folder === mediaFolder);
+        const currentCategoryAssets = mediaAssets.filter((m) => matchesSameGroup(m.folder));
         const maxOrder = currentCategoryAssets.length > 0
           ? Math.max(...currentCategoryAssets.map((b) => b.order ?? 0))
           : 0;
 
         for (let i = 0; i < total; i++) {
           const file = mediaFiles[i];
-          setUploadBatchStatus(`अपलोड हो रहा है (${i + 1}/${total}): ${file.name}...`);
+          setUploadBatchStatus(`Cloudinary पर अपलोड हो रहा है (${i + 1}/${total}): ${file.name}...`);
           const baseProgress = Math.round((i / total) * 100);
           setMediaUploadProgress(Math.max(10, baseProgress));
 
@@ -627,7 +683,10 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
             url: uploadedUrl,
             folder: mediaFolder,
             name: itemTitle,
-            tags: ['जीविका अवसर'],
+            tags:
+              mediaFolder === 'general' || mediaFolder === 'schemes'
+                ? ['सरकारी योजना', 'जीविका अपडेट']
+                : ['जीविका अवसर'],
             used: 1,
             time: Date.now() + i,
             createdAt: new Date().toISOString(),
@@ -637,7 +696,9 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
             active: true,
           });
         }
-        onNotify(`सफलतापूर्वक ${total} तस्वीरें अपलोड हो गईं और गैलरी/स्लाइडर में जोड़ दी गईं!`);
+        const msg = `सफलतापूर्वक ${total} तस्वीर(ें) Cloudinary पर अपलोड हो गईं और वेबसाइट पर लाइव हैं!`;
+        onNotify(msg);
+        setMediaStatusNotice({ type: 'success', text: msg });
       } else {
         let url = mediaDirectUrl.trim();
         if (mediaFile) {
@@ -651,7 +712,7 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
           throw new Error('तस्वीर अपलोड नहीं हो सकी या अमान्य URL है।');
         }
 
-        const currentCategoryAssets = mediaAssets.filter((m) => m.folder === mediaFolder);
+        const currentCategoryAssets = mediaAssets.filter((m) => matchesSameGroup(m.folder));
         const maxOrder = currentCategoryAssets.length > 0
           ? Math.max(...currentCategoryAssets.map((b) => b.order ?? 0))
           : 0;
@@ -660,7 +721,10 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
           url,
           folder: mediaFolder,
           name: mediaTitle.trim(),
-          tags: ['जीविका अवसर'],
+          tags:
+            mediaFolder === 'general' || mediaFolder === 'schemes'
+              ? ['सरकारी योजना', 'जीविका अपडेट']
+              : ['जीविका अवसर'],
           used: 1,
           time: Date.now(),
           createdAt: new Date().toISOString(),
@@ -669,21 +733,17 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
           order: maxOrder + 1,
           active: true,
         });
-        onNotify('तस्वीर अपलोड हो गई और गैलरी में सहेज दी गई!');
+        const msg = 'तस्वीर Cloudinary पर अपलोड हो गई और वेबसाइट पर लाइव कर दी गई!';
+        onNotify(msg);
+        setMediaStatusNotice({ type: 'success', text: msg });
       }
 
-      setMediaFile(null);
-      setMediaFiles([]);
-      setMediaPreview('');
-      setMediaPreviews([]);
-      setMediaDirectUrl('');
-      setMediaTitle('');
-      setMediaCtaUrl('');
-      setMediaCtaLabel('');
-      setUploadBatchStatus('');
+      resetMediaForm();
       await loadMediaAndShowcase();
     } catch (err: any) {
-      onNotify('अपलोड विफल: ' + (err.message || 'त्रुटि हुई'));
+      const errMsg = 'अपलोड विफल: ' + (err?.message || 'त्रुटि हुई');
+      onNotify(errMsg);
+      setMediaStatusNotice({ type: 'error', text: errMsg });
     } finally {
       setMediaUploading(false);
       setMediaUploadProgress(0);
@@ -692,9 +752,9 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
   };
 
   const handleDeleteMedia = async (id: string) => {
-    await mediaStorageService.updateMediaAsset(id, { active: false });
+    await mediaStorageService.deleteMediaAsset(id);
     setConfirmActionKey(null);
-    onNotify('तस्वीर सफलतापूर्वक छिपा दी गई है (Hidden).');
+    onNotify('तस्वीर गैलरी से स्थायी रूप से हटा दी गई।');
     loadMediaAndShowcase();
   };
 
@@ -709,6 +769,8 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
     setMediaDirectUrl(m.url.startsWith('http') ? m.url : '');
     setMediaCtaUrl(m.ctaUrl || '');
     setMediaCtaLabel(m.ctaLabel || '');
+    setMediaStatusNotice(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
     const formEl = document.getElementById('cloudinary-uploader-form');
     if (formEl) formEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
     onNotify(`संपादक मोड सक्रिय: "${m.name}"`);
@@ -1643,14 +1705,53 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
           {activeTab === 'media' && (
             <div className="space-y-6">
               <div id="cloudinary-uploader-form" className="bg-white border border-[#DCE3EA] rounded-2xl p-6 space-y-4">
-                <div className="pb-2 border-b border-[#DCE3EA]">
-                  <h3 className="text-base font-bold text-[#17365D]">
-                    मीडिया अपलोडर (Upload Media)
-                  </h3>
-                  <p className="text-xs text-[#5F6B76]">
-                    बैनर, कौशल प्रशिक्षण गैलरी या उत्पाद चित्र अपलोड करें।
-                  </p>
+                <div className="pb-2 border-b border-[#DCE3EA] flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h3 className="text-base font-bold text-[#17365D]">
+                      मीडिया अपलोडर (Cloudinary Media Upload)
+                    </h3>
+                    <p className="text-xs text-[#5F6B76]">
+                      हीरो बैनर, सरकारी योजनाएं (General / Schemes), कौशल प्रशिक्षण गैलरी या उत्पाद चित्र अपलोड करें।
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => go('home')}
+                      className="px-3 py-1.5 rounded-lg text-xs font-bold bg-[#F7F9FC] hover:bg-slate-100 text-[#17365D] border border-[#DCE3EA] flex items-center gap-1"
+                    >
+                      <Icon name="eye" size={13} />
+                      <span>होम पेज पर देखें</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => go('opportunities')}
+                      className="px-3 py-1.5 rounded-lg text-xs font-bold bg-[#F7F9FC] hover:bg-slate-100 text-[#245A91] border border-[#DCE3EA] flex items-center gap-1"
+                    >
+                      <Icon name="shieldCheck" size={13} />
+                      <span>योजनाएं देखें</span>
+                    </button>
+                  </div>
                 </div>
+
+                {mediaStatusNotice && (
+                  <div
+                    className={`p-3 rounded-xl border text-xs font-bold flex items-center justify-between gap-2 ${
+                      mediaStatusNotice.type === 'success'
+                        ? 'bg-[#E9F4F2] border-[#287D73]/30 text-[#287D73]'
+                        : 'bg-[#FDEDEC] border-[#9E2A2B]/30 text-[#9E2A2B]'
+                    }`}
+                  >
+                    <span>{mediaStatusNotice.text}</span>
+                    <button
+                      type="button"
+                      onClick={() => setMediaStatusNotice(null)}
+                      className="text-[11px] underline flex-none"
+                    >
+                      बंद
+                    </button>
+                  </div>
+                )}
 
                 {editingMediaId && (
                   <div className="p-3 bg-[#FFF8EB] border border-[#FDE68A] rounded-xl flex items-center justify-between text-xs text-[#B45309] font-bold">
@@ -1659,14 +1760,7 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
                       type="button"
                       onClick={() => {
                         setEditingMediaId(null);
-                        setMediaTitle('');
-                        setMediaCtaUrl('');
-                        setMediaCtaLabel('');
-                        setMediaPreview('');
-                        setMediaPreviews([]);
-                        setMediaFile(null);
-                        setMediaFiles([]);
-                        setMediaDirectUrl('');
+                        resetMediaForm();
                       }}
                       className="px-2.5 py-1 rounded bg-white border border-[#FDE68A] text-[#B45309] font-bold text-[11px]"
                     >
@@ -1700,12 +1794,22 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
                         className="w-full min-h-[42px] p-2.5 rounded-xl border border-[#DCE3EA] bg-white text-[#17365D] font-bold"
                       >
                         <option value="banner">हीरो बैनर (Hero Banner Slider)</option>
+                        <option value="general">सामान्य व सरकारी योजनाएं (General / Schemes)</option>
+                        <option value="schemes">सरकारी योजना विशेष (Government Schemes)</option>
                         <option value="training">कौशल प्रशिक्षण गैलरी (Training Gallery)</option>
                         <option value="showcase">ग्रामीण उत्पाद शोकेस (Showcase)</option>
                         <option value="job">रोजगार अवसर (Job Thumbnail)</option>
-                        <option value="general">सामान्य / अन्य (General / Other)</option>
                         <option value="user_avatars">प्रोफ़ाइल अवतार (User Avatars)</option>
                       </select>
+                      <p className="text-[11px] text-[#5F6B76] mt-1">
+                        {mediaFolder === 'banner'
+                          ? 'यह इमेज होम पेज के टॉप हीरो बैनर स्लाइडर में दिखेगी।'
+                          : mediaFolder === 'general' || mediaFolder === 'schemes'
+                          ? 'यह इमेज होम पेज के सरकारी योजना अनुभाग, डैशबोर्ड और अवसर पेज की योजनाओं में तुरंत दिखेगी।'
+                          : mediaFolder === 'training'
+                          ? 'यह इमेज होम पेज की कौशल प्रशिक्षण गैलरी में दिखेगी।'
+                          : 'यह इमेज चयनित गैलरी फ़ोल्डर में सहेजी जाएगी।'}
+                      </p>
                     </div>
                   </div>
 
@@ -1742,16 +1846,31 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
                         तस्वीरें चुनें (Select Files)
                       </label>
                       <input
+                        ref={fileInputRef}
                         type="file"
                         multiple
                         accept="image/*"
                         onChange={(e) => {
                           const files = e.target.files ? Array.from(e.target.files) : [];
                           if (files.length > 0) {
+                            mediaPreviews.forEach((u) => {
+                              if (u.startsWith('blob:')) {
+                                try { URL.revokeObjectURL(u); } catch {}
+                              }
+                            });
+                            const nextPreviews = files.map((f) => URL.createObjectURL(f));
+                            setMediaDirectUrl('');
                             setMediaFiles(files);
-                            setMediaPreviews(files.map((f) => URL.createObjectURL(f)));
+                            setMediaPreviews(nextPreviews);
                             setMediaFile(files[0]);
-                            setMediaPreview(URL.createObjectURL(files[0]));
+                            setMediaPreview(nextPreviews[0]);
+                            if (!mediaTitle.trim()) {
+                              const cleanedName = files[0].name
+                                .replace(/\.[^/.]+$/, '')
+                                .replace(/[_-]+/g, ' ')
+                                .trim();
+                              if (cleanedName) setMediaTitle(cleanedName);
+                            }
                           }
                         }}
                         className="w-full p-2 rounded-xl border border-[#DCE3EA] bg-white text-[#17365D]"
@@ -1765,9 +1884,21 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
                         type="url"
                         value={mediaDirectUrl}
                         onChange={(e) => {
-                          setMediaDirectUrl(e.target.value);
-                          if (e.target.value.trim()) {
-                            setMediaPreview(e.target.value.trim());
+                          const val = e.target.value;
+                          setMediaDirectUrl(val);
+                          if (val.trim()) {
+                            mediaPreviews.forEach((u) => {
+                              if (u.startsWith('blob:')) {
+                                try { URL.revokeObjectURL(u); } catch {}
+                              }
+                            });
+                            setMediaFiles([]);
+                            setMediaPreviews([]);
+                            setMediaFile(null);
+                            if (fileInputRef.current) fileInputRef.current.value = '';
+                            setMediaPreview(val.trim());
+                          } else if (mediaFiles.length === 0) {
+                            setMediaPreview('');
                           }
                         }}
                         placeholder="https://..."
@@ -1783,10 +1914,16 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
                         <button
                           type="button"
                           onClick={() => {
+                            mediaPreviews.forEach((u) => {
+                              if (u.startsWith('blob:')) {
+                                try { URL.revokeObjectURL(u); } catch {}
+                              }
+                            });
                             setMediaFiles([]);
                             setMediaPreviews([]);
                             setMediaFile(null);
                             setMediaPreview('');
+                            if (fileInputRef.current) fileInputRef.current.value = '';
                           }}
                           className="text-[#9E2A2B] hover:underline text-[11px]"
                         >
@@ -1803,6 +1940,10 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
                             <button
                               type="button"
                               onClick={() => {
+                                const removed = mediaPreviews[pIdx];
+                                if (removed?.startsWith('blob:')) {
+                                  try { URL.revokeObjectURL(removed); } catch {}
+                                }
                                 const newFiles = mediaFiles.filter((_, i) => i !== pIdx);
                                 const newPrev = mediaPreviews.filter((_, i) => i !== pIdx);
                                 setMediaFiles(newFiles);
@@ -1813,6 +1954,7 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
                                 } else {
                                   setMediaFile(null);
                                   setMediaPreview('');
+                                  if (fileInputRef.current) fileInputRef.current.value = '';
                                 }
                               }}
                               className="absolute top-1 right-1 w-5 h-5 rounded-full bg-[#9E2A2B] text-white flex items-center justify-center text-[10px] font-bold"
@@ -1876,6 +2018,7 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
                     {[
                       { id: 'all', label: `सभी (${mediaAssets.length})` },
                       { id: 'banner', label: `होम बैनर (${heroBannerAssets.length})` },
+                      { id: 'general', label: `योजनाएं / सामान्य (${generalSchemeAssets.length})` },
                       { id: 'training', label: 'कौशल गैलरी' },
                       { id: 'showcase', label: 'उत्पाद' },
                       { id: 'job', label: 'नौकरी' },
@@ -1900,8 +2043,8 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
                         await loadMediaAndShowcase();
                         onNotify(
                           count > 0
-                            ? `${count} स्थानीय तस्वीरें Firestore क्लाउड में सुरक्षित सिंक की गईं!`
-                            : 'सभी तस्वीरें क्लाउड डेटाबेस से लाइव सिंक हैं!'
+                            ? `${count} स्थानीय तस्वीरें क्लाउड में सुरक्षित सिंक की गईं!`
+                            : 'सभी तस्वीरें सिंक और अद्यतन हैं!'
                         );
                       }}
                       className="px-3 py-1.5 rounded-lg font-bold bg-[#E9F4F2] hover:bg-[#287D73]/20 text-[#287D73] border border-[#287D73]/30 flex items-center gap-1"
@@ -1921,7 +2064,10 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
                   <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
                     {filteredMediaAssets.map((m, idx) => {
                       const isBanner = m.folder === 'banner' || m.folder === 'hero_banner';
-                      const bannerIdx = isBanner ? heroBannerAssets.findIndex((b) => b.id === m.id) : -1;
+                      const isScheme = m.folder === 'general' || m.folder === 'schemes' || m.folder === 'scheme';
+                      const supportsOrder = isBanner || isScheme;
+                      const groupList = isBanner ? heroBannerAssets : generalSchemeAssets;
+                      const bannerIdx = supportsOrder ? groupList.findIndex((b) => b.id === m.id) : -1;
                       const displayOrder = typeof m.order === 'number'
                         ? m.order
                         : (bannerIdx >= 0 ? bannerIdx + 1 : idx + 1);
@@ -1930,7 +2076,7 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
                         <div
                           key={m.id}
                           className={`rounded-2xl border overflow-hidden bg-white flex flex-col ${
-                            isBanner && m.active === false
+                            m.active === false
                               ? 'border-dashed border-slate-300 opacity-60 bg-[#F7F9FC]'
                               : 'border-[#DCE3EA] hover:border-[#245A91]'
                           }`}
@@ -1946,20 +2092,18 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
                               <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-black/70 text-white uppercase">
                                 {m.folder}
                               </span>
-                              {isBanner && (
-                                <span
-                                  className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
-                                    m.active !== false
-                                      ? 'bg-[#287D73] text-white'
-                                      : 'bg-slate-700 text-slate-200'
-                                  }`}
-                                >
-                                  {m.active !== false ? 'सक्रिय' : 'छिपा हुआ'}
-                                </span>
-                              )}
+                              <span
+                                className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
+                                  m.active !== false
+                                    ? 'bg-[#287D73] text-white'
+                                    : 'bg-slate-700 text-slate-200'
+                                }`}
+                              >
+                                {m.active !== false ? 'सक्रिय' : 'छिपा हुआ'}
+                              </span>
                             </div>
 
-                            {isBanner && (
+                            {supportsOrder && (
                               <div className="absolute top-2.5 right-2.5">
                                 <span className="px-2.5 py-1 rounded-md text-xs font-bold bg-[#17365D] text-white tabular-nums">
                                   स्थान #{displayOrder}
@@ -2018,20 +2162,18 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
                             )}
 
                             <div className="flex items-center flex-wrap gap-1.5 pt-1 border-t border-[#DCE3EA]">
-                              {isBanner && (
-                                <button
-                                  type="button"
-                                  onClick={() => handleToggleMediaActive(m.id, m.active)}
-                                  className={`py-1.5 px-2.5 rounded-lg text-[11px] font-bold border flex items-center gap-1 ${
-                                    m.active !== false
-                                      ? 'bg-white hover:bg-slate-100 text-[#5F6B76] border-[#DCE3EA]'
-                                      : 'bg-[#E9F4F2] text-[#287D73] border-[#287D73]/30'
-                                  }`}
-                                >
-                                  <Icon name={m.active !== false ? 'eyeOff' : 'eye'} size={13} />
-                                  <span>{m.active !== false ? 'छिपाएं' : 'सक्रिय'}</span>
-                                </button>
-                              )}
+                              <button
+                                type="button"
+                                onClick={() => handleToggleMediaActive(m.id, m.active)}
+                                className={`py-1.5 px-2.5 rounded-lg text-[11px] font-bold border flex items-center gap-1 ${
+                                  m.active !== false
+                                    ? 'bg-white hover:bg-slate-100 text-[#5F6B76] border-[#DCE3EA]'
+                                    : 'bg-[#E9F4F2] text-[#287D73] border-[#287D73]/30'
+                                }`}
+                              >
+                                <Icon name={m.active !== false ? 'eyeOff' : 'eye'} size={13} />
+                                <span>{m.active !== false ? 'छिपाएं' : 'सक्रिय'}</span>
+                              </button>
                               <button
                                 type="button"
                                 onClick={() => handleEditMedia(m)}

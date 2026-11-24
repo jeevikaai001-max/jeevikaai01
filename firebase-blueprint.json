@@ -80,6 +80,61 @@
         "demandNote": { "type": "string", "maxLength": 300 }
       },
       "required": ["id", "name", "role"]
+    },
+    "MediaAsset": {
+      "title": "MediaAsset",
+      "description": "Cloudinary-hosted banner, scheme, training gallery, job, or avatar media record",
+      "type": "object",
+      "properties": {
+        "url": { "type": "string", "maxLength": 1000 },
+        "folder": { "type": "string", "maxLength": 64 },
+        "name": { "type": "string", "maxLength": 200 },
+        "tags": { "type": "array" },
+        "used": { "type": "number" },
+        "time": { "type": "number" },
+        "ctaUrl": { "type": "string", "maxLength": 500 },
+        "ctaLabel": { "type": "string", "maxLength": 100 },
+        "order": { "type": "number" },
+        "active": { "type": "boolean" }
+      },
+      "required": ["url", "folder", "name"]
+    },
+    "ShowcaseProduct": {
+      "title": "ShowcaseProduct",
+      "description": "Rural artisan or local business product showcase listing",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 1000 },
+        "imageUrl": { "type": "string", "maxLength": 1000 },
+        "price": { "type": "string", "maxLength": 100 },
+        "category": { "type": "string", "maxLength": 100 },
+        "artisanName": { "type": "string", "maxLength": 150 },
+        "location": { "type": "string", "maxLength": 200 },
+        "contactPhone": { "type": "string", "maxLength": 30 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["title", "imageUrl", "artisanName"]
+    },
+    "GovernmentScheme": {
+      "title": "GovernmentScheme",
+      "description": "Admin-published government welfare or livelihood scheme card",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 200 },
+        "hiName": { "type": "string", "maxLength": 200 },
+        "benefit": { "type": "string", "maxLength": 500 },
+        "eligibility": { "type": "string", "maxLength": 500 },
+        "applyOffice": { "type": "string", "maxLength": 200 },
+        "category": { "type": "string", "enum": ["central", "state", "toolkit", "loan"] },
+        "financialSupport": { "type": "string", "maxLength": 200 },
+        "imageUrl": { "type": "string", "maxLength": 1000 },
+        "ctaUrl": { "type": "string", "maxLength": 500 },
+        "ctaLabel": { "type": "string", "maxLength": 100 }
+      },
+      "required": ["id", "name", "benefit"]
     }
   },
   "firestore": {
@@ -98,6 +153,18 @@
     "/pathways/{pathwayId}": {
       "schema": "Pathway",
       "description": "Curated NSQF career progression pathways"
+    },
+    "/media/{mediaId}": {
+      "schema": "MediaAsset",
+      "description": "Admin-uploaded Cloudinary media assets, hero banners, training gallery, and general/scheme banners"
+    },
+    "/showcase/{productId}": {
+      "schema": "ShowcaseProduct",
+      "description": "Local business and rural artisan showcase products"
+    },
+    "/schemes/{schemeId}": {
+      "schema": "GovernmentScheme",
+      "description": "Government schemes and grant listings"
     }
   }
 }

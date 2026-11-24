@@ -67,6 +67,13 @@ export function App() {
   const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
   const [shortlist, setShortlist] = useState<Record<string, boolean>>(() => storageService.loadShortlist());
   const [savedItems, setSavedItems] = useState<Record<string, Opportunity>>(() => storageService.loadShortlistItems());
+  const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('jeevika_theme') === 'dark';
+    } catch {
+      return false;
+    }
+  });
   const [toastMessage, setToastMessage] = useState<string>('');
   const [selectedOpportunity, setSelectedOpportunity] = useState<Opportunity | null>(null);
   const [summaryModalData, setSummaryModalData] = useState<SummaryModalData | null>(null);
@@ -93,6 +100,13 @@ export function App() {
   const pendingSectionRef = useRef<string | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasAutoDetectedGpsRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    try {
+      document.documentElement.classList.toggle('dark', isDarkMode);
+      localStorage.setItem('jeevika_theme', isDarkMode ? 'dark' : 'light');
+    } catch {}
+  }, [isDarkMode]);
 
   const notify = (msg: string) => {
     setToastMessage(msg);
@@ -671,6 +685,8 @@ export function App() {
           onStartVoiceAssessment={() => setShowVoiceStartModal(true)}
           onOpenAdminLogin={() => setAdminLoginModalOpen(true)}
           onOpenAccount={setAccountMode}
+          isDarkMode={isDarkMode}
+          onToggleDarkMode={() => setIsDarkMode((prev) => !prev)}
         />
       )}
 

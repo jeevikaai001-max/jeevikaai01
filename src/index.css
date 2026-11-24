@@ -115,3 +115,155 @@
   -ms-overflow-style: none;
   scrollbar-width: none;
 }
+
+/* Dark Mode Theme (scoped strictly to html.dark; light mode untouched) */
+html.dark {
+  color-scheme: dark;
+  --bg-main: #0B1320;
+  --bg-secondary: #111C2D;
+  --navy-primary: #F1F5F9;
+  --text-main: #E2E8F0;
+  --text-secondary: #94A3B8;
+  --border-subtle: #27374D;
+}
+
+html.dark body {
+  background-color: #0B1320;
+  color: #E2E8F0;
+}
+
+html.dark h1,
+html.dark h2,
+html.dark h3,
+html.dark h4,
+html.dark h5,
+html.dark h6 {
+  color: #F1F5F9;
+}
+
+html.dark .bg-white {
+  background-color: #111C2D;
+}
+
+html.dark .bg-white\/95 {
+  background-color: rgba(17, 28, 45, 0.95);
+}
+
+html.dark .bg-white\/90 {
+  background-color: rgba(17, 28, 45, 0.9);
+}
+
+html.dark .bg-\[\#FFFFFF\] {
+  background-color: #0B1320;
+}
+
+html.dark .bg-\[\#F7F9FC\],
+html.dark .bg-\[\#FBFCFD\],
+html.dark .bg-slate-50 {
+  background-color: #0F1929;
+}
+
+html.dark .bg-slate-100,
+html.dark .bg-slate-200,
+html.dark .bg-\[\#DCE3EA\] {
+  background-color: #1E2E45;
+}
+
+html.dark .bg-\[\#E3F1FA\],
+html.dark .bg-\[\#EBF3FB\],
+html.dark .bg-\[\#EBF3FA\] {
+  background-color: rgba(36, 90, 145, 0.25);
+}
+
+html.dark .bg-\[\#E9F4F2\] {
+  background-color: rgba(40, 125, 115, 0.22);
+}
+
+html.dark .bg-\[\#FFF8EB\],
+html.dark .bg-\[\#FFF4DB\],
+html.dark .bg-\[\#FFF8EE\] {
+  background-color: rgba(217, 130, 43, 0.16);
+}
+
+html.dark .bg-\[\#FDEDEC\] {
+  background-color: rgba(158, 42, 43, 0.24);
+}
+
+html.dark .text-\[\#17365D\] {
+  color: #F1F5F9;
+}
+
+html.dark .text-\[\#202B36\],
+html.dark .text-slate-600,
+html.dark .text-slate-700,
+html.dark .text-slate-800 {
+  color: #E2E8F0;
+}
+
+html.dark .text-\[\#5F6B76\],
+html.dark .text-slate-400,
+html.dark .text-slate-500 {
+  color: #94A3B8;
+}
+
+html.dark .text-\[\#245A91\] {
+  color: #7DD3FC;
+}
+
+html.dark .text-\[\#287D73\],
+html.dark .text-\[\#1E6058\] {
+  color: #5EEAD4;
+}
+
+html.dark .text-\[\#B45309\],
+html.dark .text-\[\#B8691A\],
+html.dark .text-\[\#D9822B\],
+html.dark .text-\[\#8F5517\],
+html.dark .text-\[\#7D4912\],
+html.dark .text-\[\#9A4E0B\] {
+  color: #FBBF24;
+}
+
+html.dark .text-\[\#9E2A2B\] {
+  color: #FCA5A5;
+}
+
+html.dark .text-white {
+  color: #FFFFFF;
+}
+
+html.dark .border-\[\#DCE3EA\],
+html.dark .border-\[\#C5D1DD\],
+html.dark .border-slate-200,
+html.dark .border-slate-300 {
+  border-color: #27374D;
+}
+
+html.dark .border-\[\#FDE68A\],
+html.dark .border-\[\#EBCB7A\] {
+  border-color: rgba(217, 130, 43, 0.35);
+}
+
+html.dark .hover\:bg-\[\#F7F9FC\]:hover,
+html.dark .hover\:bg-slate-50:hover,
+html.dark .hover\:bg-slate-100:hover,
+html.dark .hover\:bg-\[\#EBF3FA\]:hover {
+  background-color: #1E2E45;
+}
+
+html.dark .hover\:text-\[\#17365D\]:hover {
+  color: #FFFFFF;
+}
+
+html.dark input:not([type="checkbox"]):not([type="radio"]),
+html.dark textarea,
+html.dark select {
+  background-color: #0F1929;
+  color: #F1F5F9;
+  border-color: #27374D;
+}
+
+html.dark input::placeholder,
+html.dark textarea::placeholder {
+  color: #94A3B8;
+}

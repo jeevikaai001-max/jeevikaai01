@@ -261,6 +261,10 @@ export interface GovernmentScheme {
   category: 'central' | 'state' | 'toolkit' | 'loan';
   financialSupport: string;
   imageUrl?: string;
+  ctaUrl?: string;
+  ctaLabel?: string;
+  tags?: string[];
+  isAdminUploaded?: boolean;
 }
 
 export interface LocationInsight {

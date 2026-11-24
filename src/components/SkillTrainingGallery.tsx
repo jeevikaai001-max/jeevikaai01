@@ -87,14 +87,16 @@ export const SkillTrainingGallery: React.FC<SkillTrainingGalleryProps> = ({ go }
 
   useEffect(() => {
     let isMounted = true;
-    mediaStorageService.getMediaAssets().then((assets) => {
-      if (isMounted) {
-        const filtered = assets.filter((m) => m.folder === 'training');
-        setTrainingMedia(filtered);
-      }
+    const unsubscribe = mediaStorageService.subscribeMediaAssets((assets) => {
+      if (!isMounted) return;
+      const filtered = (assets || []).filter(
+        (m) => m.folder === 'training' && m.active !== false
+      );
+      setTrainingMedia(filtered);
     });
     return () => {
       isMounted = false;
+      unsubscribe();
     };
   }, []);
 
@@ -166,8 +168,11 @@ export const SkillTrainingGallery: React.FC<SkillTrainingGalleryProps> = ({ go }
                     className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                     loading="lazy"
                     onError={(e) => {
-                      (e.target as HTMLImageElement).src =
-                        '/src/assets/images/trade_computer_1795513567280.jpg';
+                      const img = e.currentTarget;
+                      if (!img.dataset.fallbackApplied) {
+                        img.dataset.fallbackApplied = '1';
+                        img.src = '/src/assets/images/trade_computer_1795513567280.jpg';
+                      }
                     }}
                   />
                   <span className="absolute top-3 left-3 px-2.5 py-1 rounded-lg text-[10px] font-bold bg-[#17365D]/90 text-white">
@@ -181,13 +186,30 @@ export const SkillTrainingGallery: React.FC<SkillTrainingGalleryProps> = ({ go }
                   </h3>
 
                   {m.ctaUrl ? (
-                    <a
-                      href={m.ctaUrl}
-                      className="w-full min-h-[44px] py-2.5 rounded-xl bg-[#17365D] hover:bg-[#245A91] text-white font-bold text-xs transition-colors flex items-center justify-center gap-1.5"
-                    >
-                      <span>{m.ctaLabel || 'विवरण देखें'}</span>
-                      <Icon name="arrowR" size={14} />
-                    </a>
+                    m.ctaUrl.startsWith('/') ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const normalized = m.ctaUrl!.replace(/^\/+/, '').split('/')[0] as AppView;
+                          const validViews: AppView[] = ['home', 'assessment', 'dashboard', 'opportunities', 'training', 'skill-gap', 'saved', 'history', 'profile', 'faq', 'notifications', 'admin'];
+                          go(validViews.includes(normalized) ? normalized : 'training');
+                        }}
+                        className="w-full min-h-[44px] py-2.5 rounded-xl bg-[#17365D] hover:bg-[#245A91] text-white font-bold text-xs transition-colors flex items-center justify-center gap-1.5"
+                      >
+                        <span>{m.ctaLabel || 'विवरण देखें'}</span>
+                        <Icon name="arrowR" size={14} />
+                      </button>
+                    ) : (
+                      <a
+                        href={m.ctaUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="w-full min-h-[44px] py-2.5 rounded-xl bg-[#17365D] hover:bg-[#245A91] text-white font-bold text-xs transition-colors flex items-center justify-center gap-1.5"
+                      >
+                        <span>{m.ctaLabel || 'विवरण देखें'}</span>
+                        <Icon name="arrowR" size={14} />
+                      </a>
+                    )
                   ) : (
                     <button
                       type="button"

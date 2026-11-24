@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Icon } from './Icons';
 import { SchemeCard } from './SchemeCard';
 import { DistrictMiniMap } from './DistrictMiniMap';
@@ -9,6 +9,7 @@ import {
   AppView,
   SummaryModalData,
   LocationLivelihoodData,
+  GovernmentScheme,
 } from '../types';
 import { AppUser } from '../services/firebase';
 import { rankPaths, rankJobs, buildSummary, slug } from '../services/recommendationEngine';
@@ -16,6 +17,11 @@ import { EDU, WORK, MOB } from '../data/mockData';
 import { speechService } from '../services/speechService';
 import { storageService } from '../services/storageService';
 import { locationIntelligenceService, POPULAR_INDIAN_REGIONS } from '../services/locationIntelligenceService';
+import {
+  mediaStorageService,
+  buildGeneralSchemeMedia,
+  toGovernmentSchemeFromMedia,
+} from '../services/cloudinaryService';
 import {
   dt,
   optionLabel,
@@ -118,6 +124,19 @@ export const Dashboard: React.FC<DashboardProps> = ({
   currentUser,
   onOpenAccount,
 }) => {
+  const [uploadedSchemes, setUploadedSchemes] = useState<GovernmentScheme[]>([]);
+
+  useEffect(() => {
+    let isMounted = true;
+    const unsub = mediaStorageService.subscribeMediaAssets((assets) => {
+      if (!isMounted) return;
+      setUploadedSchemes(buildGeneralSchemeMedia(assets).map(toGovernmentSchemeFromMedia));
+    });
+    return () => {
+      isMounted = false;
+      unsub();
+    };
+  }, []);
   const L = currentLang;
   const rankedPaths = useMemo(() => rankPaths(profile), [profile]);
   const topPaths = rankedPaths.slice(0, 3);
@@ -727,8 +746,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
           <Panel id="schemes-section">
             <SectionHead icon="shieldCheck" tag={districtShort} title={dt('schemesTitle', L)} />
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3 sm:gap-4">
-              {schemes.slice(0, 3).map((s) => (
-                <SchemeCard key={s.id} scheme={s} lang={L} />
+              {[...uploadedSchemes, ...schemes.slice(0, 3)].map((s) => (
+                <SchemeCard key={s.id} scheme={s} lang={L} onNavigate={go} />
               ))}
             </div>
             {schemesAreFallback && <p className="mt-3 text-xs text-[#5F6B76]">{dt('schemeFallbackNote', L)}</p>}

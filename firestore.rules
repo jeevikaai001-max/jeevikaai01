@@ -46,9 +46,19 @@ service cloud.firestore {
       allow read, write, create, update, delete: if true;
     }
 
+    // Government Schemes & Grant Cards
+    match /schemes/{schemeId} {
+      allow read, write, create, update, delete: if true;
+    }
+
     // System Statistics & Location Intelligence
     match /analytics/{docId} {
       allow read, write: if true;
+    }
+
+    // Connectivity health probe
+    match /test/{docId} {
+      allow read: if true;
     }
   }
 }

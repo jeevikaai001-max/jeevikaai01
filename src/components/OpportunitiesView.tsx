@@ -1,12 +1,23 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Icon } from './Icons';
 import { SchemeCard } from './SchemeCard';
-import { Opportunity, SupportedLanguage, LocationLivelihoodData, BeneficiaryProfile } from '../types';
+import {
+  Opportunity,
+  SupportedLanguage,
+  LocationLivelihoodData,
+  BeneficiaryProfile,
+  GovernmentScheme,
+} from '../types';
 import { JOBS } from '../data/mockData';
 import { t } from '../services/translationService';
 import { contentService, OperationType, handleFirestoreError } from '../services/firebase';
 import { speechService } from '../services/speechService';
 import { POPULAR_INDIAN_REGIONS, locationIntelligenceService } from '../services/locationIntelligenceService';
+import {
+  mediaStorageService,
+  buildGeneralSchemeMedia,
+  toGovernmentSchemeFromMedia,
+} from '../services/cloudinaryService';
 
 interface OpportunitiesViewProps {
   onShortlistToggle: (id: string, item?: Opportunity) => void;
@@ -46,6 +57,19 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
   const [firestoreError, setFirestoreError] = useState<string | null>(null);
   const [speakingJobId, setSpeakingJobId] = useState<string | null>(null);
   const [isDetectingGps, setIsDetectingGps] = useState<boolean>(false);
+  const [uploadedSchemes, setUploadedSchemes] = useState<GovernmentScheme[]>([]);
+
+  useEffect(() => {
+    let isMounted = true;
+    const unsub = mediaStorageService.subscribeMediaAssets((assets) => {
+      if (!isMounted) return;
+      setUploadedSchemes(buildGeneralSchemeMedia(assets).map(toGovernmentSchemeFromMedia));
+    });
+    return () => {
+      isMounted = false;
+      unsub();
+    };
+  }, []);
 
   const initialDistrict = useMemo(() => {
     if (locationData?.district) return locationData.district;
@@ -565,7 +589,7 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
         )}
       </div>
 
-      {locationData?.schemes && locationData.schemes.length > 0 && (
+      {(uploadedSchemes.length > 0 || (locationData?.schemes && locationData.schemes.length > 0)) && (
         <section className="mt-12 pt-8 border-t border-[#DCE3EA] space-y-4">
           <div>
             <div className="text-xs font-bold text-[#245A91] mb-1">
@@ -577,8 +601,8 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {locationData.schemes.map((scheme) => (
-              <SchemeCard key={scheme.id} scheme={scheme} lang={currentLang} />
+            {[...uploadedSchemes, ...(locationData?.schemes || [])].map((scheme) => (
+              <SchemeCard key={scheme.id} scheme={scheme} lang={currentLang} onNavigate={go} />
             ))}
           </div>
         </section>

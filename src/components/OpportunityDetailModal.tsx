@@ -24,6 +24,7 @@ export const OpportunityDetailModal: React.FC<OpportunityDetailModalProps> = ({
   currentLang = 'hi',
 }) => {
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [shareStatus, setShareStatus] = useState<'idle' | 'shared' | 'copied'>('idle');
 
   if (!opp) return null;
 
@@ -87,6 +88,78 @@ export const OpportunityDetailModal: React.FC<OpportunityDetailModalProps> = ({
     speechService.speak(spokenText, currentLang, () => {
       setIsSpeaking(false);
     });
+  };
+
+  const handleShare = async () => {
+    const typeLabel =
+      opp.type === 'Training'
+        ? currentLang === 'en'
+          ? 'Training Center'
+          : 'प्रशिक्षण केंद्र'
+        : opp.type === 'Job'
+        ? currentLang === 'en'
+          ? 'Job Opportunity'
+          : 'रोजगार अवसर'
+        : currentLang === 'en'
+        ? 'Self-Employment'
+        : 'स्वरोजगार अवसर';
+
+    const shareLines = [
+      `${typeLabel}: ${opp.title}`,
+      `${opp.org}`,
+      `📍 ${opp.loc}, ${districtName} (~${kmDistance} km)`,
+      `💰 ${opp.pay}`,
+      opp.eligibility ? `✅ ${opp.eligibility}` : '',
+      opp.contactInfo ? `📞 ${opp.contactInfo}` : '',
+      `🗺️ ${googleMapsDirectionsUrl}`,
+    ].filter(Boolean);
+
+    const shareText = shareLines.join('\n');
+    const shareUrl = typeof window !== 'undefined' ? window.location.href : '';
+
+    const copyFallback = async () => {
+      try {
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+          await navigator.clipboard.writeText(shareText);
+        } else {
+          const ta = document.createElement('textarea');
+          ta.value = shareText;
+          ta.setAttribute('readonly', '');
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          document.body.removeChild(ta);
+        }
+        setShareStatus('copied');
+        setTimeout(() => setShareStatus('idle'), 2500);
+      } catch {
+        // Ignore clipboard errors silently
+      }
+    };
+
+    if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
+      try {
+        await navigator.share({
+          title: opp.title,
+          text: shareText,
+          ...(shareUrl ? { url: shareUrl } : {}),
+        });
+        setShareStatus('shared');
+        setTimeout(() => setShareStatus('idle'), 2500);
+        return;
+      } catch (err: any) {
+        if (err?.name === 'AbortError') {
+          return;
+        }
+        // Fallback to clipboard if Web Share API is blocked or unsupported in this context
+        await copyFallback();
+        return;
+      }
+    }
+
+    await copyFallback();
   };
 
   return (
@@ -272,7 +345,7 @@ export const OpportunityDetailModal: React.FC<OpportunityDetailModalProps> = ({
 
         {/* Footer */}
         <div className="p-4 border-t border-[#DCE3EA] flex items-center justify-between gap-2 bg-white flex-wrap">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <button
               type="button"
               onClick={() => onShortlistToggle(opp.id, opp)}
@@ -284,6 +357,34 @@ export const OpportunityDetailModal: React.FC<OpportunityDetailModalProps> = ({
             >
               <Icon name="star" size={14} className={isShortlisted ? 'fill-[#D9822B]' : ''} />
               <span>{isShortlisted ? 'सहेजा गया (Saved)' : 'सहेजें (Shortlist)'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleShare}
+              aria-label={currentLang === 'en' ? 'Share opportunity' : 'साझा करें'}
+              className={`min-h-[42px] px-3.5 py-2 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition-colors ${
+                shareStatus !== 'idle'
+                  ? 'bg-[#E9F4F2] border-[#287D73]/40 text-[#287D73]'
+                  : 'border-[#DCE3EA] bg-[#F7F9FC] text-[#17365D] hover:border-[#245A91] hover:bg-[#E3F1FA]/50'
+              }`}
+            >
+              <Icon name={shareStatus !== 'idle' ? 'check' : 'share'} size={14} />
+              <span>
+                {shareStatus === 'copied'
+                  ? currentLang === 'en'
+                    ? 'Copied!'
+                    : 'कॉपी हो गया (Copied)'
+                  : shareStatus === 'shared'
+                  ? currentLang === 'en'
+                    ? 'Shared!'
+                    : 'साझा किया गया'
+                  : currentLang === 'en'
+                  ? 'Share'
+                  : currentLang === 'bho'
+                  ? 'शेयर करीं (Share)'
+                  : 'साझा करें (Share)'}
+              </span>
             </button>
 
             <a

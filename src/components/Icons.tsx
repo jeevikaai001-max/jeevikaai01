@@ -68,6 +68,7 @@ import {
   Camera,
   Lock,
   Bookmark,
+  Moon,
 } from 'lucide-react';
 
 interface IconProps {
@@ -95,6 +96,7 @@ export const Icon: React.FC<IconProps> = ({ name, size = 20, className = '', sty
     case 'chev': return <ChevronDown size={size} className={className} style={style} />;
     case 'bulb': return <Lightbulb size={size} className={className} style={style} />;
     case 'sun': return <Sun size={size} className={className} style={style} />;
+    case 'moon': return <Moon size={size} className={className} style={style} />;
     case 'scissors': return <Scissors size={size} className={className} style={style} />;
     case 'store': return <Store size={size} className={className} style={style} />;
     case 'monitor': return <Monitor size={size} className={className} style={style} />;

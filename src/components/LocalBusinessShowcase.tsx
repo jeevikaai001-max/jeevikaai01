@@ -17,18 +17,18 @@ export const LocalBusinessShowcase: React.FC<LocalBusinessShowcaseProps> = ({
   const [products, setProducts] = useState<ShowcaseProduct[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
 
-  const loadProducts = async () => {
-    setLoading(true);
-    try {
-      const data = await mediaStorageService.getShowcaseProducts();
-      setProducts(data);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   useEffect(() => {
-    loadProducts();
+    let isMounted = true;
+    setLoading(true);
+    const unsubscribe = mediaStorageService.subscribeShowcaseProducts((data) => {
+      if (!isMounted) return;
+      setProducts(data || []);
+      setLoading(false);
+    });
+    return () => {
+      isMounted = false;
+      unsubscribe();
+    };
   }, []);
 
   return (

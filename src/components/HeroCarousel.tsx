@@ -1,10 +1,42 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Icon } from './Icons';
 import { HeroSlide, AppView } from '../types';
-import { mediaStorageService, DEFAULT_HERO_SLIDES } from '../services/cloudinaryService';
+import {
+  mediaStorageService,
+  DEFAULT_HERO_SLIDES,
+  buildHeroSlidesFromMedia,
+} from '../services/cloudinaryService';
 
 interface HeroCarouselProps {
   go: (view: AppView) => void;
+}
+
+const KNOWN_VIEWS: Set<string> = new Set([
+  'home',
+  'assessment',
+  'dashboard',
+  'opportunities',
+  'training',
+  'skill-gap',
+  'saved',
+  'history',
+  'profile',
+  'notifications',
+  'faq',
+  'accessibility',
+  'privacy',
+  'about',
+  'admin',
+  'business-upload',
+  'seller-analytics',
+]);
+
+function resolveInternalView(ctaUrl?: string): AppView | null {
+  if (!ctaUrl) return null;
+  const trimmed = ctaUrl.trim();
+  if (!trimmed || /^https?:\/\//i.test(trimmed)) return null;
+  const normalized = trimmed.replace(/^[/#]+/, '').toLowerCase();
+  return KNOWN_VIEWS.has(normalized) ? (normalized as AppView) : null;
 }
 
 export const HeroCarousel: React.FC<HeroCarouselProps> = ({ go }) => {
@@ -12,22 +44,26 @@ export const HeroCarousel: React.FC<HeroCarouselProps> = ({ go }) => {
   const [currentIndex, setCurrentIndex] = useState<number>(0);
   const [isPaused, setIsPaused] = useState<boolean>(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const firstSlideIdRef = useRef<string>(DEFAULT_HERO_SLIDES[0]?.id || '');
 
   useEffect(() => {
     let isMounted = true;
 
-    const refreshSlides = () => {
-      mediaStorageService.getHeroSlides().then((res) => {
-        if (isMounted) {
-          setSlides(res);
-        }
-      });
+    const applySlides = (nextSlides: HeroSlide[]) => {
+      if (!isMounted) return;
+      const valid = nextSlides.length > 0 ? nextSlides : DEFAULT_HERO_SLIDES;
+      setSlides(valid);
+      const nextFirstId = valid[0]?.id || '';
+      if (nextFirstId !== firstSlideIdRef.current) {
+        firstSlideIdRef.current = nextFirstId;
+        setCurrentIndex(0);
+      }
     };
 
-    refreshSlides();
+    mediaStorageService.getHeroSlides().then(applySlides);
 
-    const unsubscribe = mediaStorageService.subscribeMediaAssets(() => {
-      refreshSlides();
+    const unsubscribe = mediaStorageService.subscribeMediaAssets((assets) => {
+      applySlides(buildHeroSlidesFromMedia(assets));
     });
 
     return () => {
@@ -67,6 +103,8 @@ export const HeroCarousel: React.FC<HeroCarouselProps> = ({ go }) => {
   const current = validSlides[currentIndex] || validSlides[0];
   if (!current) return null;
 
+  const internalCtaView = resolveInternalView(current.ctaUrl);
+
   return (
     <div
       className="relative w-full rounded-2xl overflow-hidden border border-[#DCE3EA]/30 bg-[#0F233D] group"
@@ -91,8 +129,11 @@ export const HeroCarousel: React.FC<HeroCarouselProps> = ({ go }) => {
                 className="w-full h-full object-cover object-center"
                 loading={idx === 0 ? 'eager' : 'lazy'}
                 onError={(e) => {
-                  (e.target as HTMLImageElement).src =
-                    '/src/assets/images/hero_livelihood_banner_1795513568498.jpg';
+                  const img = e.target as HTMLImageElement;
+                  if (!img.dataset.fallbackApplied) {
+                    img.dataset.fallbackApplied = '1';
+                    img.src = '/src/assets/images/hero_livelihood_banner_1795513568498.jpg';
+                  }
                 }}
               />
               <div className="absolute inset-0 bg-gradient-to-t from-[#0B1B30]/90 via-[#0B1B30]/40 to-transparent" />
@@ -134,9 +175,20 @@ export const HeroCarousel: React.FC<HeroCarouselProps> = ({ go }) => {
             })()}
           </div>
 
-          {current.ctaUrl ? (
+          {internalCtaView ? (
+            <button
+              type="button"
+              onClick={() => go(internalCtaView)}
+              className="inline-flex items-center gap-1.5 min-h-[40px] px-3.5 py-2 rounded-xl bg-white hover:bg-[#F7F9FC] text-[#17365D] text-xs font-extrabold border border-[#DCE3EA] transition-colors flex-shrink-0 mb-1"
+            >
+              <span>{current.ctaLabel || 'अवसर देखें'}</span>
+              <Icon name="arrowR" size={13} />
+            </button>
+          ) : current.ctaUrl ? (
             <a
               href={current.ctaUrl}
+              target="_blank"
+              rel="noopener noreferrer"
               className="inline-flex items-center gap-1.5 min-h-[40px] px-3.5 py-2 rounded-xl bg-white hover:bg-[#F7F9FC] text-[#17365D] text-xs font-extrabold border border-[#DCE3EA] transition-colors flex-shrink-0 mb-1"
             >
               <span>{current.ctaLabel || 'अवसर देखें'}</span>
@@ -148,44 +200,50 @@ export const HeroCarousel: React.FC<HeroCarouselProps> = ({ go }) => {
               onClick={() => go(current.linkView!)}
               className="inline-flex items-center gap-1.5 min-h-[40px] px-3.5 py-2 rounded-xl bg-white hover:bg-[#F7F9FC] text-[#17365D] text-xs font-extrabold border border-[#DCE3EA] transition-colors flex-shrink-0 mb-1"
             >
-              <span>अवसर देखें</span>
+              <span>{current.ctaLabel || 'अवसर देखें'}</span>
               <Icon name="arrowR" size={13} />
             </button>
           ) : null}
         </div>
 
         {/* Carousel Navigation Arrows */}
-        <button
-          type="button"
-          onClick={prevSlide}
-          aria-label="Previous slide"
-          className="absolute left-2.5 top-1/2 -translate-y-1/2 z-30 w-10 h-10 rounded-xl bg-[#0B1B30]/60 hover:bg-[#0B1B30]/85 text-white border border-white/20 flex items-center justify-center transition-colors opacity-85 group-hover:opacity-100"
-        >
-          <Icon name="arrowL" size={16} />
-        </button>
-        <button
-          type="button"
-          onClick={nextSlide}
-          aria-label="Next slide"
-          className="absolute right-2.5 top-1/2 -translate-y-1/2 z-30 w-10 h-10 rounded-xl bg-[#0B1B30]/60 hover:bg-[#0B1B30]/85 text-white border border-white/20 flex items-center justify-center transition-colors opacity-85 group-hover:opacity-100"
-        >
-          <Icon name="arrowR" size={16} />
-        </button>
+        {validSlides.length > 1 && (
+          <>
+            <button
+              type="button"
+              onClick={prevSlide}
+              aria-label="Previous slide"
+              className="absolute left-2.5 top-1/2 -translate-y-1/2 z-30 w-10 h-10 rounded-xl bg-[#0B1B30]/60 hover:bg-[#0B1B30]/85 text-white border border-white/20 flex items-center justify-center transition-colors opacity-85 group-hover:opacity-100"
+            >
+              <Icon name="arrowL" size={16} />
+            </button>
+            <button
+              type="button"
+              onClick={nextSlide}
+              aria-label="Next slide"
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 z-30 w-10 h-10 rounded-xl bg-[#0B1B30]/60 hover:bg-[#0B1B30]/85 text-white border border-white/20 flex items-center justify-center transition-colors opacity-85 group-hover:opacity-100"
+            >
+              <Icon name="arrowR" size={16} />
+            </button>
+          </>
+        )}
 
         {/* Indicators Bar */}
-        <div className="absolute bottom-3 right-4 sm:right-6 z-30 flex items-center gap-1.5">
-          {slides.map((_, i) => (
-            <button
-              key={i}
-              type="button"
-              onClick={() => setCurrentIndex(i)}
-              aria-label={`Go to slide ${i + 1}`}
-              className={`h-1.5 rounded-full transition-all duration-300 ${
-                i === currentIndex ? 'w-6 bg-[#F4B966]' : 'w-2 bg-white/45 hover:bg-white/75'
-              }`}
-            />
-          ))}
-        </div>
+        {validSlides.length > 1 && (
+          <div className="absolute bottom-3 right-4 sm:right-6 z-30 flex items-center gap-1.5">
+            {validSlides.map((_, i) => (
+              <button
+                key={i}
+                type="button"
+                onClick={() => setCurrentIndex(i)}
+                aria-label={`Go to slide ${i + 1}`}
+                className={`h-1.5 rounded-full transition-all duration-300 ${
+                  i === currentIndex ? 'w-6 bg-[#F4B966]' : 'w-2 bg-white/45 hover:bg-white/75'
+                }`}
+              />
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

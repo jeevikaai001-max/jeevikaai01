@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { GovernmentScheme, SupportedLanguage } from '../types';
+import { AppView, GovernmentScheme, SupportedLanguage } from '../types';
 import { DEFAULT_SCHEME_IMAGE } from '../services/locationIntelligenceService';
 import { dt, schemeName, isEnglishLike } from '../services/dashboardLocale';
 import { Icon } from './Icons';
@@ -7,6 +7,7 @@ import { Icon } from './Icons';
 interface SchemeCardProps {
   scheme: GovernmentScheme;
   lang: SupportedLanguage;
+  onNavigate?: (view: AppView) => void;
 }
 
 const CATEGORY_LABELS: Record<GovernmentScheme['category'], Record<SupportedLanguage, string>> = {
@@ -36,7 +37,27 @@ const CATEGORY_LABELS: Record<GovernmentScheme['category'], Record<SupportedLang
   },
 };
 
-export const SchemeCard: React.FC<SchemeCardProps> = ({ scheme, lang }) => {
+const KNOWN_INTERNAL_VIEWS = new Set([
+  'home',
+  'assessment',
+  'dashboard',
+  'opportunities',
+  'training',
+  'skill-gap',
+  'saved',
+  'history',
+  'profile',
+  'notifications',
+  'faq',
+  'accessibility',
+  'privacy',
+  'about',
+  'admin',
+  'business-upload',
+  'seller-analytics',
+]);
+
+export const SchemeCard: React.FC<SchemeCardProps> = ({ scheme, lang, onNavigate }) => {
   const [expanded, setExpanded] = useState(false);
 
   const schemeImg = scheme.imageUrl || DEFAULT_SCHEME_IMAGE;
@@ -65,18 +86,34 @@ export const SchemeCard: React.FC<SchemeCardProps> = ({ scheme, lang }) => {
       ? 'संक्षिप्त करें'
       : 'पात्रता व पूरी जानकारी देखें';
 
+  const trimmedCta = scheme.ctaUrl?.trim() || '';
+  const internalTarget =
+    trimmedCta && !/^https?:\/\//i.test(trimmedCta)
+      ? trimmedCta.replace(/^[/#]+/, '').toLowerCase()
+      : '';
+  const isInternalRoute = Boolean(internalTarget && KNOWN_INTERNAL_VIEWS.has(internalTarget));
+
   return (
     <article className="rounded-2xl border border-[#DCE3EA] bg-white flex flex-col overflow-hidden transition-colors hover:border-[#245A91]">
-      <div className="w-full h-32 sm:h-36 bg-[#F7F9FC] relative overflow-hidden flex-none border-b border-[#DCE3EA]">
+      <div className="w-full h-36 sm:h-40 bg-[#F7F9FC] relative overflow-hidden flex-none border-b border-[#DCE3EA]">
         <img
           src={schemeImg}
           alt={title}
           loading="lazy"
           className="w-full h-full object-cover object-center"
           onError={(e) => {
-            (e.target as HTMLImageElement).src = DEFAULT_SCHEME_IMAGE;
+            const img = e.target as HTMLImageElement;
+            if (!img.dataset.fallbackApplied) {
+              img.dataset.fallbackApplied = '1';
+              img.src = DEFAULT_SCHEME_IMAGE;
+            }
           }}
         />
+        {scheme.isAdminUploaded && (
+          <span className="absolute top-2.5 left-2.5 px-2.5 py-0.5 rounded-md text-[10px] font-bold bg-[#17365D]/90 text-white border border-white/15">
+            {lang === 'en' ? 'Featured Update' : 'विशेष योजना'}
+          </span>
+        )}
       </div>
 
       <div className="p-4 flex flex-col gap-2.5 flex-1">
@@ -135,6 +172,29 @@ export const SchemeCard: React.FC<SchemeCardProps> = ({ scheme, lang }) => {
               {scheme.applyOffice}
             </span>
           </div>
+
+          {trimmedCta && (
+            isInternalRoute && onNavigate ? (
+              <button
+                type="button"
+                onClick={() => onNavigate(internalTarget as AppView)}
+                className="min-h-[40px] w-full px-3 py-1.5 rounded-xl bg-[#245A91] hover:bg-[#17365D] text-white text-xs font-extrabold flex items-center justify-center gap-1.5 transition-colors"
+              >
+                <span>{scheme.ctaLabel || (lang === 'en' ? 'Open Details' : 'योजना देखें')}</span>
+                <Icon name="arrowR" size={13} />
+              </button>
+            ) : (
+              <a
+                href={trimmedCta}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="min-h-[40px] w-full px-3 py-1.5 rounded-xl bg-[#245A91] hover:bg-[#17365D] text-white text-xs font-extrabold flex items-center justify-center gap-1.5 transition-colors"
+              >
+                <span>{scheme.ctaLabel || (lang === 'en' ? 'Apply / View More' : 'आवेदन / जानकारी देखें')}</span>
+                <Icon name="arrowR" size={13} />
+              </a>
+            )
+          )}
 
           <button
             type="button"

@@ -223,6 +223,7 @@ export const AssistedAccountModal: React.FC<Props> = ({
   const [isCheckingPhone, setIsCheckingPhone] = useState(false);
   const [phoneCheckResult, setPhoneCheckResult] = useState<PhoneCheckResult | null>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
+  const digitInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -298,14 +299,134 @@ export const AssistedAccountModal: React.FC<Props> = ({
     };
   }, [isOpen, step, mode, L, promptFor]);
 
+  const latestRef = useRef({
+    step,
+    phone,
+    pin,
+    pin2,
+    onClose,
+    next: () => {},
+  });
+
   useEffect(() => {
     if (!isOpen) {
       speechService.stopSpeaking();
       speechService.stopListening();
       setIsListening(false);
-    } else {
+    } else if (step === 'intro') {
       closeRef.current?.focus();
     }
+  }, [isOpen, step]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const isDigitStep =
+      step === 'phone' ||
+      step === 'pin' ||
+      step === 'pin2' ||
+      step === 'forgot_phone' ||
+      step === 'forgot_newpin';
+    if (!isDigitStep) return;
+
+    const focusTimer = setTimeout(() => {
+      digitInputRef.current?.focus();
+    }, 40);
+    return () => clearTimeout(focusTimer);
+  }, [isOpen, step]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const extractKeyboardDigit = (e: KeyboardEvent): string | null => {
+      if (e.ctrlKey || e.metaKey || e.altKey || e.isComposing) return null;
+      if (/^[0-9]$/.test(e.key)) return e.key;
+      if (/^[०-९]$/.test(e.key)) return String(e.key.charCodeAt(0) - 0x0966);
+      if (!e.shiftKey) {
+        const match = /^(?:Digit|Numpad)([0-9])$/.exec(e.code);
+        if (match) return match[1];
+      }
+      return null;
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const { step: curStep, phone: curPhone, pin: curPin, pin2: curPin2, onClose: closeModal, next: goNext } =
+        latestRef.current;
+
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeModal();
+        return;
+      }
+
+      const activeEl = document.activeElement as HTMLElement | null;
+      const tag = activeEl?.tagName;
+
+      if (curStep === 'intro' && e.key === 'Enter' && tag !== 'BUTTON') {
+        e.preventDefault();
+        goNext();
+        return;
+      }
+
+      const isDigitStep =
+        curStep === 'phone' ||
+        curStep === 'pin' ||
+        curStep === 'pin2' ||
+        curStep === 'forgot_phone' ||
+        curStep === 'forgot_newpin';
+      if (!isDigitStep) return;
+
+      // Let focused INPUT/TEXTAREA handle typing natively
+      if (tag === 'INPUT' || tag === 'TEXTAREA') {
+        return;
+      }
+
+      const digit = extractKeyboardDigit(e);
+      if (digit !== null) {
+        e.preventDefault();
+        speechService.stopSpeaking();
+        setMessage('');
+        const currentMax = curStep === 'phone' || curStep === 'forgot_phone' ? 10 : 4;
+        const setter =
+          curStep === 'phone' || curStep === 'forgot_phone'
+            ? setPhone
+            : curStep === 'pin2'
+            ? setPin2
+            : setPin;
+        setter((prev) => (prev + digit).replace(/\D/g, '').slice(0, currentMax));
+        digitInputRef.current?.focus();
+        return;
+      }
+
+      if (e.key === 'Backspace') {
+        e.preventDefault();
+        setMessage('');
+        const setter =
+          curStep === 'phone' || curStep === 'forgot_phone'
+            ? setPhone
+            : curStep === 'pin2'
+            ? setPin2
+            : setPin;
+        setter((prev) => prev.slice(0, -1));
+        digitInputRef.current?.focus();
+        return;
+      }
+
+      if (e.key === 'Enter' && tag !== 'BUTTON') {
+        const isReadyNow =
+          ((curStep === 'phone' || curStep === 'forgot_phone') && curPhone.length === 10) ||
+          ((curStep === 'pin' || curStep === 'forgot_newpin') && curPin.length === 4) ||
+          (curStep === 'pin2' && curPin2.length === 4);
+        if (isReadyNow) {
+          e.preventDefault();
+          goNext();
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown, true);
+    };
   }, [isOpen]);
 
   const stopMic = () => {
@@ -463,6 +584,8 @@ export const AssistedAccountModal: React.FC<Props> = ({
     }
   }, [phone, pin, pin2, step, isOpen]);
 
+  latestRef.current = { step, phone, pin, pin2, onClose, next };
+
   if (!isOpen) return null;
 
   const isForgotStep = step === 'forgot_phone' || step === 'forgot_verify' || step === 'forgot_newpin';
@@ -476,8 +599,11 @@ export const AssistedAccountModal: React.FC<Props> = ({
       : '';
   const maxLen = step === 'phone' || step === 'forgot_phone' ? 10 : 4;
 
+  const toAsciiDigits = (v: string) =>
+    v.replace(/[०-९]/g, (ch) => String(ch.charCodeAt(0) - 0x0966)).replace(/\D/g, '');
+
   const setField = (v: string) => {
-    const nextVal = v.replace(/\D/g, '').slice(0, maxLen);
+    const nextVal = toAsciiDigits(v).slice(0, maxLen);
     if (step === 'phone' || step === 'forgot_phone') setPhone(nextVal);
     else if (step === 'pin' || step === 'forgot_newpin') setPin(nextVal);
     else if (step === 'pin2') setPin2(nextVal);
@@ -704,14 +830,18 @@ export const AssistedAccountModal: React.FC<Props> = ({
 
           {(step === 'phone' || step === 'pin' || step === 'pin2' || step === 'forgot_phone' || step === 'forgot_newpin') && (
             <>
-              <div className="rounded-xl border-2 border-[#245A91]/30 bg-white p-3 text-center" aria-live="polite">
-                <div className="text-[11px] font-bold uppercase tracking-wider text-[#5F6B76] mb-1">
+              <div
+                onClick={() => digitInputRef.current?.focus()}
+                className="relative rounded-xl border-2 border-[#245A91]/30 bg-white p-3 text-center cursor-text focus-within:border-[#245A91]"
+                aria-live="polite"
+              >
+                <div className="pointer-events-none text-[11px] font-bold uppercase tracking-wider text-[#5F6B76] mb-1">
                   {step === 'phone' || step === 'forgot_phone'
                     ? tx('yourNumber', L)
                     : tx('pinLabel', L)}
                 </div>
                 {step === 'phone' || step === 'forgot_phone' ? (
-                  <div className="flex items-center justify-center gap-3 text-2xl sm:text-3xl font-extrabold tracking-widest text-[#17365D] font-mono tabular-nums">
+                  <div className="pointer-events-none flex items-center justify-center gap-3 text-2xl sm:text-3xl font-extrabold tracking-widest text-[#17365D] font-mono tabular-nums">
                     {phoneGroups.map((g, gi) => (
                       <span key={gi} className="flex gap-1">
                         {g.map((d, i) => (
@@ -723,7 +853,7 @@ export const AssistedAccountModal: React.FC<Props> = ({
                     ))}
                   </div>
                 ) : (
-                  <div className="flex items-center justify-center gap-3 py-1">
+                  <div className="pointer-events-none flex items-center justify-center gap-3 py-1">
                     {[0, 1, 2, 3].map((i) => (
                       <span
                         key={i}
@@ -735,10 +865,60 @@ export const AssistedAccountModal: React.FC<Props> = ({
                   </div>
                 )}
                 {step !== 'phone' && step !== 'forgot_phone' && (
-                  <div className="mt-1 text-xs text-[#5F6B76]">
+                  <div className="pointer-events-none mt-1 text-xs text-[#5F6B76]">
                     {tx('yourNumber', L)}: <span className="font-bold font-mono tabular-nums">{phone}</span>
                   </div>
                 )}
+                <input
+                  key={step}
+                  ref={digitInputRef}
+                  autoFocus
+                  type={step === 'phone' || step === 'forgot_phone' ? 'tel' : 'password'}
+                  inputMode="numeric"
+                  autoComplete={step === 'phone' || step === 'forgot_phone' ? 'tel-national' : 'new-password'}
+                  value={field}
+                  aria-label={step === 'phone' || step === 'forgot_phone' ? tx('yourNumber', L) : tx('pinLabel', L)}
+                  onFocus={(e) => {
+                    try {
+                      const len = e.currentTarget.value.length;
+                      e.currentTarget.setSelectionRange(len, len);
+                    } catch {
+                      // ignore
+                    }
+                  }}
+                  onClick={(e) => {
+                    try {
+                      const len = e.currentTarget.value.length;
+                      e.currentTarget.setSelectionRange(len, len);
+                    } catch {
+                      // ignore
+                    }
+                  }}
+                  onChange={(e) => {
+                    speechService.stopSpeaking();
+                    setMessage('');
+                    setField(e.target.value);
+                  }}
+                  onPaste={(e) => {
+                    if (step === 'phone' || step === 'forgot_phone') {
+                      const pasted = e.clipboardData?.getData('text') || '';
+                      const normalized = normalizePhone(toAsciiDigits(pasted));
+                      if (normalized) {
+                        e.preventDefault();
+                        speechService.stopSpeaking();
+                        setMessage('');
+                        setField(normalized);
+                      }
+                    }
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && ready) {
+                      e.preventDefault();
+                      next();
+                    }
+                  }}
+                  className="absolute inset-0 z-10 w-full h-full opacity-0 cursor-text"
+                />
               </div>
 
               {step === 'phone' && (
