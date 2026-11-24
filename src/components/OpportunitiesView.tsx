@@ -6,7 +6,7 @@ import {
   SupportedLanguage,
   LocationLivelihoodData,
   BeneficiaryProfile,
-  GovernmentScheme,
+  MediaAssetRecord,
 } from '../types';
 import { JOBS } from '../data/mockData';
 import { t } from '../services/translationService';
@@ -15,8 +15,7 @@ import { speechService } from '../services/speechService';
 import { POPULAR_INDIAN_REGIONS, locationIntelligenceService } from '../services/locationIntelligenceService';
 import {
   mediaStorageService,
-  buildGeneralSchemeMedia,
-  toGovernmentSchemeFromMedia,
+  applyAdminSchemeImages,
 } from '../services/cloudinaryService';
 
 interface OpportunitiesViewProps {
@@ -57,13 +56,13 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
   const [firestoreError, setFirestoreError] = useState<string | null>(null);
   const [speakingJobId, setSpeakingJobId] = useState<string | null>(null);
   const [isDetectingGps, setIsDetectingGps] = useState<boolean>(false);
-  const [uploadedSchemes, setUploadedSchemes] = useState<GovernmentScheme[]>([]);
+  const [mediaAssets, setMediaAssets] = useState<MediaAssetRecord[]>([]);
 
   useEffect(() => {
     let isMounted = true;
     const unsub = mediaStorageService.subscribeMediaAssets((assets) => {
       if (!isMounted) return;
-      setUploadedSchemes(buildGeneralSchemeMedia(assets).map(toGovernmentSchemeFromMedia));
+      setMediaAssets(assets || []);
     });
     return () => {
       isMounted = false;
@@ -589,7 +588,7 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
         )}
       </div>
 
-      {(uploadedSchemes.length > 0 || (locationData?.schemes && locationData.schemes.length > 0)) && (
+      {locationData?.schemes && locationData.schemes.length > 0 && (
         <section className="mt-12 pt-8 border-t border-[#DCE3EA] space-y-4">
           <div>
             <div className="text-xs font-bold text-[#245A91] mb-1">
@@ -601,7 +600,7 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {(uploadedSchemes.length > 0 ? uploadedSchemes : (locationData?.schemes || [])).map((scheme) => (
+            {applyAdminSchemeImages(locationData.schemes, mediaAssets).map((scheme) => (
               <SchemeCard key={scheme.id} scheme={scheme} lang={currentLang} onNavigate={go} />
             ))}
           </div>

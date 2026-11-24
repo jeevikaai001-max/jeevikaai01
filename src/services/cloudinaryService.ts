@@ -24,9 +24,9 @@ import {
 
 // Cloudinary Configuration (Cloud Name and Upload Preset provided by user)
 export const CLOUDINARY_CLOUD_NAME =
-  (import.meta.env.VITE_CLOUDINARY_CLOUD_NAME as string) || 'kvyah2au';
+  (import.meta.env?.VITE_CLOUDINARY_CLOUD_NAME as string) || 'kvyah2au';
 export const CLOUDINARY_UPLOAD_PRESET =
-  (import.meta.env.VITE_CLOUDINARY_UPLOAD_PRESET as string) || 'jeevikaai';
+  (import.meta.env?.VITE_CLOUDINARY_UPLOAD_PRESET as string) || 'jeevikaai';
 
 export const CLOUDINARY_UPLOAD_URL = `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`;
 
@@ -306,6 +306,91 @@ export function buildGeneralSchemeMedia(media: MediaAssetRecord[]): MediaAssetRe
       if (orderA !== orderB) return orderA - orderB;
       return (b.time || 0) - (a.time || 0);
     });
+}
+
+/**
+ * Maps uploaded `general` / `schemes` media images onto actual GovernmentScheme cards
+ * (PM Vishwakarma, PMKVY 4.0, PMMY, etc.) without creating fake blank scheme cards.
+ */
+export function applyAdminSchemeImages(
+  schemes: GovernmentScheme[],
+  media: MediaAssetRecord[]
+): GovernmentScheme[] {
+  if (!schemes || schemes.length === 0) return [];
+  const schemeMedia = buildGeneralSchemeMedia(media);
+
+  // Strip any legacy mock placeholder image from schemes
+  const sanitized = schemes.map((s) => {
+    const raw = s.imageUrl?.trim() || '';
+    const isLegacyMock = raw.includes('hero_livelihood_banner_');
+    return {
+      ...s,
+      imageUrl: isLegacyMock ? undefined : raw || undefined,
+    };
+  });
+
+  if (schemeMedia.length === 0) {
+    return sanitized;
+  }
+
+  const usedMediaIds = new Set<string>();
+  const matchedBySchemeIdx = new Map<number, MediaAssetRecord>();
+
+  const keywordSets: { match: (s: GovernmentScheme) => boolean; words: string[] }[] = [
+    {
+      match: (s) => /vishwakarma|विश्वकर्मा/i.test(`${s.name} ${s.hiName}`),
+      words: ['vishwakarma', 'विश्वकर्मा', 'toolkit', 'टूलकिट'],
+    },
+    {
+      match: (s) => /kaushal|pmkvy|कौशल/i.test(`${s.name} ${s.hiName}`),
+      words: ['kaushal', 'pmkvy', 'कौशल', 'skill'],
+    },
+    {
+      match: (s) => /mudra|pmmy|मुद्रा/i.test(`${s.name} ${s.hiName}`),
+      words: ['mudra', 'pmmy', 'मुद्रा', 'loan', 'ऋण'],
+    },
+    {
+      match: (s) => /odop|एक जिला एक उत्पाद/i.test(`${s.name} ${s.hiName}`),
+      words: ['odop', 'उत्पाद'],
+    },
+    {
+      match: (s) => /udyami|उद्यमी/i.test(`${s.name} ${s.hiName}`),
+      words: ['udyami', 'उद्यमी'],
+    },
+  ];
+
+  // Pass 1: Explicit title/tag match if admin named the image after a specific scheme
+  sanitized.forEach((scheme, sIdx) => {
+    const rule = keywordSets.find((k) => k.match(scheme));
+    if (!rule) return;
+    const matchedMedia = schemeMedia.find((m) => {
+      if (usedMediaIds.has(m.id)) return false;
+      const haystack = `${m.name || ''} ${(m.tags || []).join(' ')}`.toLowerCase();
+      return rule.words.some((w) => haystack.includes(w));
+    });
+    if (matchedMedia) {
+      usedMediaIds.add(matchedMedia.id);
+      matchedBySchemeIdx.set(sIdx, matchedMedia);
+    }
+  });
+
+  // Pass 2: Assign remaining uploaded scheme images in order to remaining scheme cards
+  const remainingPool = schemeMedia.filter((m) => !usedMediaIds.has(m.id));
+  const fallbackPool = remainingPool.length > 0 ? remainingPool : schemeMedia;
+  let poolCursor = 0;
+
+  return sanitized.map((scheme, idx) => {
+    const chosen =
+      matchedBySchemeIdx.get(idx) ||
+      fallbackPool[poolCursor++ % fallbackPool.length];
+    if (!chosen) return scheme;
+    return {
+      ...scheme,
+      imageUrl: chosen.url,
+      ...(chosen.ctaUrl ? { ctaUrl: chosen.ctaUrl } : {}),
+      ...(chosen.ctaLabel ? { ctaLabel: chosen.ctaLabel } : {}),
+    };
+  });
 }
 
 /**

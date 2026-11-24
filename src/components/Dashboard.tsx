@@ -9,7 +9,7 @@ import {
   AppView,
   SummaryModalData,
   LocationLivelihoodData,
-  GovernmentScheme,
+  MediaAssetRecord,
 } from '../types';
 import { AppUser } from '../services/firebase';
 import { rankPaths, rankJobs, buildSummary, slug } from '../services/recommendationEngine';
@@ -19,8 +19,7 @@ import { storageService } from '../services/storageService';
 import { locationIntelligenceService, POPULAR_INDIAN_REGIONS } from '../services/locationIntelligenceService';
 import {
   mediaStorageService,
-  buildGeneralSchemeMedia,
-  toGovernmentSchemeFromMedia,
+  applyAdminSchemeImages,
 } from '../services/cloudinaryService';
 import {
   dt,
@@ -124,13 +123,13 @@ export const Dashboard: React.FC<DashboardProps> = ({
   currentUser,
   onOpenAccount,
 }) => {
-  const [uploadedSchemes, setUploadedSchemes] = useState<GovernmentScheme[]>([]);
+  const [mediaAssets, setMediaAssets] = useState<MediaAssetRecord[]>([]);
 
   useEffect(() => {
     let isMounted = true;
     const unsub = mediaStorageService.subscribeMediaAssets((assets) => {
       if (!isMounted) return;
-      setUploadedSchemes(buildGeneralSchemeMedia(assets).map(toGovernmentSchemeFromMedia));
+      setMediaAssets(assets || []);
     });
     return () => {
       isMounted = false;
@@ -746,11 +745,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
           <Panel id="schemes-section">
             <SectionHead icon="shieldCheck" tag={districtShort} title={dt('schemesTitle', L)} />
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3 sm:gap-4">
-              {(uploadedSchemes.length > 0 ? uploadedSchemes : schemes.slice(0, 3)).map((s) => (
+              {applyAdminSchemeImages(schemes.slice(0, 3), mediaAssets).map((s) => (
                 <SchemeCard key={s.id} scheme={s} lang={L} onNavigate={go} />
               ))}
             </div>
-            {uploadedSchemes.length === 0 && schemesAreFallback && (
+            {schemesAreFallback && (
               <p className="mt-3 text-xs text-[#5F6B76]">{dt('schemeFallbackNote', L)}</p>
             )}
           </Panel>

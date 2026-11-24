@@ -370,17 +370,22 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
   }, [mediaAssets]);
 
   const handleMoveSlide = async (id: string, direction: 'up' | 'down') => {
-    const banners = [...heroBannerAssets];
-    const currentIndex = banners.findIndex((b) => b.id === id);
+    const targetItem = mediaAssets.find((m) => m.id === id);
+    const isSchemeGroup =
+      targetItem?.folder === 'general' ||
+      targetItem?.folder === 'schemes' ||
+      targetItem?.folder === 'scheme';
+    const items = isSchemeGroup ? [...generalSchemeAssets] : [...heroBannerAssets];
+    const currentIndex = items.findIndex((b) => b.id === id);
     if (currentIndex === -1) return;
     const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
-    if (targetIndex < 0 || targetIndex >= banners.length) return;
+    if (targetIndex < 0 || targetIndex >= items.length) return;
 
-    const temp = banners[currentIndex];
-    banners[currentIndex] = banners[targetIndex];
-    banners[targetIndex] = temp;
+    const temp = items[currentIndex];
+    items[currentIndex] = items[targetIndex];
+    items[targetIndex] = temp;
 
-    const reorderedItems = banners.map((item, idx) => ({
+    const reorderedItems = items.map((item, idx) => ({
       id: item.id,
       order: idx + 1,
     }));
@@ -391,7 +396,11 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
     );
 
     await mediaStorageService.reorderMedia(reorderedItems);
-    onNotify('हीरो स्लाइडर में बैनर की स्थिति बदल दी गई! (Position updated)');
+    onNotify(
+      isSchemeGroup
+        ? 'योजना कार्ड इमेज का क्रम बदल दिया गया!'
+        : 'हीरो स्लाइडर में बैनर की स्थिति बदल दी गई! (Position updated)'
+    );
   };
 
   const handleSetSlideOrder = async (id: string, newOrder: number) => {
@@ -1805,7 +1814,7 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
                         {mediaFolder === 'banner'
                           ? 'यह इमेज होम पेज के टॉप हीरो बैनर स्लाइडर में दिखेगी।'
                           : mediaFolder === 'general' || mediaFolder === 'schemes'
-                          ? 'यह इमेज होम पेज के सरकारी योजना अनुभाग, डैशबोर्ड और अवसर पेज की योजनाओं में तुरंत दिखेगी।'
+                          ? 'यह इमेज डैशबोर्ड और अवसर पेज के वास्तविक सरकारी योजना कार्ड्स (पीएम विश्वकर्मा, कौशल विकास 4.0, मुद्रा योजना आदि) में इमेज की जगह दिखेगी।'
                           : mediaFolder === 'training'
                           ? 'यह इमेज होम पेज की कौशल प्रशिक्षण गैलरी में दिखेगी।'
                           : 'यह इमेज चयनित गैलरी फ़ोल्डर में सहेजी जाएगी।'}
@@ -2122,7 +2131,7 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
                           </div>
 
                           <div className="p-3.5 flex-1 flex flex-col justify-between space-y-3 bg-[#F7F9FC]">
-                            {isBanner && (
+                            {supportsOrder && (
                               <div className="flex items-center justify-between gap-2 bg-white p-2 rounded-xl border border-[#DCE3EA]">
                                 <div className="flex items-center gap-1.5">
                                   <span className="text-[11px] font-bold text-[#17365D]">क्रम (Pos):</span>
@@ -2150,7 +2159,7 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
                                   </button>
                                   <button
                                     type="button"
-                                    disabled={bannerIdx < 0 || bannerIdx >= heroBannerAssets.length - 1}
+                                    disabled={bannerIdx < 0 || bannerIdx >= groupList.length - 1}
                                     onClick={() => handleMoveSlide(m.id, 'down')}
                                     className="px-2.5 py-1 rounded-lg text-xs font-bold bg-[#17365D] text-white hover:bg-[#245A91] disabled:opacity-30 disabled:pointer-events-none flex items-center gap-1"
                                   >
