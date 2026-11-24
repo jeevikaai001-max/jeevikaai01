@@ -794,6 +794,29 @@ export const Assessment: React.FC<AssessmentProps> = ({
           </div>
         </div>
 
+        {/* Quick Demo Data Loader Button */}
+        <button
+          type="button"
+          onClick={() => {
+            handleStopSpeaking();
+            const demoProfile: BeneficiaryProfile = {
+              ...DEMO,
+              location: profileRef.current.location || prefetchedGpsRef.current || DEMO.location,
+              isDemo: true,
+            };
+            localStorage.setItem('jeevika_consent_given', 'true');
+            storageService.saveProfile(demoProfile);
+            onNotify(currentLang === 'en' ? 'Demo profile loaded successfully!' : 'डेमो प्रोफ़ाइल सफलतापूर्वक लोड हो गई!');
+            onSubmit(demoProfile);
+          }}
+          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-extrabold bg-[#FFF8EB] hover:bg-[#FCECC3] text-[#B45309] border border-[#FDE68A] transition-colors min-h-[40px] flex-shrink-0"
+          title="Load complete mock profile instantly for quick testing"
+        >
+          <Icon name="sparkles" size={15} />
+          <span className="hidden sm:inline">{currentLang === 'en' ? 'Load Demo' : 'डेमो डेटा'}</span>
+          <span className="sm:hidden">डेमो</span>
+        </button>
+
         {/* Language Switcher */}
         <div className="flex items-center bg-[#F7F9FC] p-0.5 rounded-xl border border-[#DCE3EA]">
           {LANG_CONFIG.map((l) => (
