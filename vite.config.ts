@@ -25,6 +25,17 @@ export default defineConfig(() => {
           if (fs.existsSync(distDir) && fs.existsSync(srcAssets)) {
             fs.cpSync(srcAssets, distAssets, {recursive: true, force: true});
           }
+          // Also copy Cloudflare Pages _headers and _redirects since Vite ignores leading underscores in public/
+          const headersSrc = path.resolve(__dirname, 'public/_headers');
+          const headersDest = path.resolve(distDir, '_headers');
+          if (fs.existsSync(headersSrc)) {
+            fs.copyFileSync(headersSrc, headersDest);
+          }
+          const redirectsSrc = path.resolve(__dirname, 'public/_redirects');
+          const redirectsDest = path.resolve(distDir, '_redirects');
+          if (fs.existsSync(redirectsSrc)) {
+            fs.copyFileSync(redirectsSrc, redirectsDest);
+          }
         },
       },
     ],
