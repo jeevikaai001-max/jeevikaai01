@@ -25,18 +25,21 @@ export interface VoiceChatResponse {
   error?: string;
 }
 
+const DEFAULT_CLOUDFLARE_WORKER_URL = 'https://ai.jeevikaai001.workers.dev';
+
 /**
- * Returns the normalized Cloudflare Worker base URL if configured via VITE_CLOUDFLARE_WORKER_URL.
- * Supports either base origin ("https://jeevika-worker.example.workers.dev")
- * or a full endpoint URL ("https://jeevika-worker.example.workers.dev/api/chat") by stripping trailing /api/*.
+ * Returns the normalized Cloudflare Worker base URL (from VITE_CLOUDFLARE_WORKER_URL or default).
+ * Supports either base origin ("https://ai.jeevikaai001.workers.dev")
+ * or a full endpoint URL ("https://ai.jeevikaai001.workers.dev/api/chat") by stripping trailing /api/*.
  */
 export function getCloudflareWorkerBaseUrl(): string {
   try {
-    const raw = String((import.meta as any).env?.VITE_CLOUDFLARE_WORKER_URL || '').trim();
+    const envRaw = String((import.meta as any).env?.VITE_CLOUDFLARE_WORKER_URL || '').trim();
+    const raw = envRaw || DEFAULT_CLOUDFLARE_WORKER_URL;
     if (!raw) return '';
     return raw.replace(/\/api\/[a-z0-9/_-]*$/i, '').replace(/\/+$/, '');
   } catch {
-    return '';
+    return DEFAULT_CLOUDFLARE_WORKER_URL;
   }
 }
 
@@ -45,8 +48,8 @@ export function isCloudflareWorkerConfigured(): boolean {
 }
 
 /**
- * Calls a JeevikaAI backend endpoint via Cloudflare Worker (when VITE_CLOUDFLARE_WORKER_URL is set)
- * with automatic fallback to local Express /api/* routes during local development or AI Studio preview.
+ * Calls a JeevikaAI backend endpoint via Cloudflare Worker
+ * with automatic fallback to local Express /api/* routes if Worker returns an error.
  */
 async function postAiRoute<T = any>(
   apiPath: string,
@@ -57,9 +60,6 @@ async function postAiRoute<T = any>(
   const workerBase = getCloudflareWorkerBaseUrl();
   const body = JSON.stringify(payload);
 
-  // Build ordered endpoint list:
-  // - If VITE_CLOUDFLARE_WORKER_URL is configured, try Worker first, then local /api/* fallback.
-  // - Otherwise call local Express /api/* directly.
   const endpoints: string[] = workerBase
     ? [`${workerBase}${normalizedPath}`, normalizedPath]
     : [normalizedPath];
@@ -69,7 +69,9 @@ async function postAiRoute<T = any>(
     'X-Jeevika-Client': 'jeevika-web-v1',
   };
 
-  for (const url of endpoints) {
+  for (let i = 0; i < endpoints.length; i++) {
+    const url = endpoints[i];
+    const isLast = i === endpoints.length - 1;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -91,6 +93,9 @@ async function postAiRoute<T = any>(
       }
 
       const data = (await response.json()) as T;
+      if (!isLast && data && typeof data === 'object' && (data as any).fallback === true) {
+        continue;
+      }
       return data;
     } catch {
       clearTimeout(timer);
