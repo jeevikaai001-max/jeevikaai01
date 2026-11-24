@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Icon } from './Icons';
 import { SchemeCard } from './SchemeCard';
 import {
@@ -8,11 +8,15 @@ import {
   BeneficiaryProfile,
   MediaAssetRecord,
 } from '../types';
-import { JOBS } from '../data/mockData';
 import { t } from '../services/translationService';
 import { contentService, OperationType, handleFirestoreError } from '../services/firebase';
 import { speechService } from '../services/speechService';
-import { POPULAR_INDIAN_REGIONS, locationIntelligenceService } from '../services/locationIntelligenceService';
+import {
+  POPULAR_INDIAN_REGIONS,
+  locationIntelligenceService,
+  LocationDetectionResult,
+  GpsCoordinates,
+} from '../services/locationIntelligenceService';
 import {
   mediaStorageService,
   applyAdminSchemeImages,
@@ -25,8 +29,8 @@ interface OpportunitiesViewProps {
   go: (route: string) => void;
   currentLang: SupportedLanguage;
   locationData?: LocationLivelihoodData | null;
-  onLocationChange?: (newLoc: string) => void;
-  onRefreshAi?: () => Promise<void>;
+  onLocationChange?: (newLoc: string, detected?: LocationDetectionResult) => void;
+  onRefreshAi?: (coords?: GpsCoordinates) => Promise<void>;
   isRefreshingAi?: boolean;
   userProfile?: BeneficiaryProfile | null;
 }
@@ -75,13 +79,34 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
     if (userProfile?.location) {
       const parts = userProfile.location.split(',').map((p) => p.trim()).filter(Boolean);
       const dist = parts.length >= 3 ? parts[parts.length - 2] : parts[0];
-      return dist || 'Maharajganj';
+      return dist || '';
     }
-    return 'Maharajganj';
+    return '';
   }, [locationData?.district, userProfile?.location]);
 
   const [selectedDistrict, setSelectedDistrict] = useState<string>(initialDistrict);
   const [showDistrictModal, setShowDistrictModal] = useState<boolean>(false);
+  const hasTriggeredMountAiRef = useRef<boolean>(false);
+
+  const liveCoords = useMemo<GpsCoordinates | undefined>(() => {
+    const gps = locationIntelligenceService.getLiveGpsCoordinates();
+    if (gps) return gps;
+    if (typeof locationData?.latitude === 'number' && typeof locationData?.longitude === 'number') {
+      return {
+        latitude: locationData.latitude,
+        longitude: locationData.longitude,
+        accuracyMeters: locationData.accuracyMeters,
+      };
+    }
+    if (typeof userProfile?.latitude === 'number' && typeof userProfile?.longitude === 'number') {
+      return {
+        latitude: userProfile.latitude,
+        longitude: userProfile.longitude,
+        accuracyMeters: userProfile.locationAccuracyMeters,
+      };
+    }
+    return undefined;
+  }, [locationData?.latitude, locationData?.longitude, locationData?.accuracyMeters, userProfile?.latitude, userProfile?.longitude, userProfile?.locationAccuracyMeters]);
 
   useEffect(() => {
     if (locationData?.district && locationData.district !== selectedDistrict) {
@@ -91,15 +116,30 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
     }
   }, [locationData?.district, initialDistrict]);
 
+  // Force an AI-driven refresh anchored to captured GPS coordinates if view opens without live AI data
+  useEffect(() => {
+    if (hasTriggeredMountAiRef.current || isRefreshingAi || isDetectingGps) return;
+    if (!locationData?.isAiGenerated && onRefreshAi) {
+      hasTriggeredMountAiRef.current = true;
+      onRefreshAi(liveCoords).catch(() => {});
+    }
+  }, [locationData?.isAiGenerated, isRefreshingAi, isDetectingGps, liveCoords, onRefreshAi]);
+
   const handleAutoDetectCurrentLocation = async () => {
     if (isDetectingGps) return;
     setIsDetectingGps(true);
     try {
       const detected = await locationIntelligenceService.detectGpsLocation();
-      if (detected && detected.location) {
+      if (detected && typeof detected.latitude === 'number' && typeof detected.longitude === 'number') {
         setSelectedDistrict(detected.district || detected.location.split(',')[0].trim());
         if (onLocationChange) {
-          onLocationChange(detected.location);
+          onLocationChange(detected.location, detected);
+        } else if (onRefreshAi) {
+          await onRefreshAi({
+            latitude: detected.latitude,
+            longitude: detected.longitude,
+            accuracyMeters: detected.accuracyMeters,
+          });
         }
       }
     } catch {
@@ -172,18 +212,7 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
       }
     });
 
-    const hasLiveLocationOpportunities = list.length > 0;
-    if (!hasLiveLocationOpportunities) {
-      JOBS.filter((j) => j.type !== 'Training').forEach((opp) => {
-        const key = `${opp.title.toLowerCase().trim()}|${opp.org.toLowerCase().trim()}`;
-        if (!seenKeys.has(key) && !seenKeys.has(opp.id)) {
-          seenKeys.add(key);
-          seenKeys.add(opp.id);
-          list.push({ ...opp, isLiveFirestore: false, fromLocationData: false });
-        }
-      });
-    }
-
+    // Zero static mock/demo JOBS fallback: only live AI locationData + Firestore opportunities
     return list;
   }, [firestoreOpportunities, locationData]);
 
@@ -322,10 +351,22 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
                   </span>
                 )}
               </div>
-              <div className="text-lg font-extrabold text-[#17365D] flex items-center gap-1.5 mt-0.5">
+              <div className="text-lg font-extrabold text-[#17365D] flex items-center gap-1.5 mt-0.5 flex-wrap">
                 <Icon name="pin" size={16} className="text-[#287D73]" />
-                <span>{selectedDistrict === 'all' ? 'समस्त जिले (All India)' : (locationData?.location || selectedDistrict)}</span>
+                <span>
+                  {selectedDistrict === 'all'
+                    ? 'समस्त जिले (All India)'
+                    : locationData?.location ||
+                      selectedDistrict ||
+                      (currentLang === 'en' ? 'Sync GPS to load area' : 'क्षेत्र लोड करने के लिए GPS सिंक करें')}
+                </span>
               </div>
+              {liveCoords && (
+                <div className="text-[11px] font-semibold text-[#245A91] tabular-nums mt-0.5">
+                  GPS: {liveCoords.latitude.toFixed(4)}° N, {liveCoords.longitude.toFixed(4)}° E
+                  {typeof liveCoords.accuracyMeters === 'number' ? ` (±${Math.round(liveCoords.accuracyMeters)}m)` : ''}
+                </div>
+              )}
             </div>
           </div>
 
@@ -358,12 +399,12 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
             {onRefreshAi && (
               <button
                 type="button"
-                onClick={onRefreshAi}
+                onClick={() => onRefreshAi(liveCoords)}
                 disabled={isRefreshingAi}
                 className="min-h-[40px] px-3.5 py-2 rounded-xl border border-[#DCE3EA] bg-white text-xs font-bold text-[#245A91] hover:bg-[#F7F9FC] transition-colors flex items-center gap-1.5 disabled:opacity-60"
               >
                 <Icon name="refresh" size={14} className={isRefreshingAi ? 'animate-spin' : ''} />
-                <span>{currentLang === 'en' ? 'Refresh' : 'ताज़ा करें'}</span>
+                <span>{currentLang === 'en' ? 'Refresh AI' : 'AI ताज़ा करें'}</span>
               </button>
             )}
 
@@ -430,14 +471,18 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
         </div>
       </div>
 
-      {isLoadingFirestore && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
-          {[1, 2].map((n) => (
-            <div key={n} className="bg-white border border-[#DCE3EA] rounded-2xl p-6 flex items-center gap-3 text-xs text-[#5F6B76]">
-              <span className="w-4 h-4 border-2 border-[#245A91] border-t-transparent rounded-full animate-spin" />
-              <span>अवसर लोड हो रहे हैं...</span>
-            </div>
-          ))}
+      {(isLoadingFirestore || isRefreshingAi || isDetectingGps) && (
+        <div className="bg-white border border-[#DCE3EA] rounded-2xl p-6 mb-6 flex items-center justify-center gap-3 text-xs font-bold text-[#17365D]">
+          <span className="w-4 h-4 border-2 border-[#245A91] border-t-transparent rounded-full animate-spin" />
+          <span>
+            {isDetectingGps
+              ? currentLang === 'en'
+                ? 'Detecting exact GPS coordinates...'
+                : 'सटीक GPS लोकेशन खोजी जा रही है...'
+              : currentLang === 'en'
+              ? 'Loading live GPS-matched opportunities via AI...'
+              : 'आपके GPS क्षेत्र के लिए AI से लाइव अवसर लोड हो रहे हैं...'}
+          </span>
         </div>
       )}
 
@@ -558,39 +603,55 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
           );
         })}
 
-        {!isLoadingFirestore && filtered.length === 0 && (
+        {!isLoadingFirestore && !isRefreshingAi && !isDetectingGps && filtered.length === 0 && (
           <div className="col-span-full py-14 text-center bg-white rounded-2xl border border-[#DCE3EA] p-6 space-y-3">
             <div className="w-12 h-12 rounded-xl bg-[#F7F9FC] border border-[#DCE3EA] text-[#5F6B76] mx-auto flex items-center justify-center">
               <Icon name="briefcase" size={24} />
             </div>
             <h3 className="text-base font-bold text-[#17365D]">
-              {selectedDistrict === 'all'
-                ? 'कोई अवसर नहीं मिला'
-                : `${selectedDistrict} जिले में अभी कोई नया अवसर नहीं है`}
+              {!selectedDistrict || selectedDistrict === 'all'
+                ? currentLang === 'en'
+                  ? 'No live opportunities loaded yet'
+                  : 'अभी कोई लाइव अवसर लोड नहीं हुआ है'
+                : currentLang === 'en'
+                ? `No live opportunities matched for ${selectedDistrict}`
+                : `${selectedDistrict} के लिए अभी कोई लाइव अवसर नहीं मिला`}
             </h3>
             <p className="text-xs text-[#5F6B76] max-w-md mx-auto">
-              {currentLang === 'bho'
-                ? 'फ़िल्टर बदल के देखीं या नज़दीकी ज़िला के अवसर देखीं।'
-                : 'फ़िल्टर बदलकर देखें या "समस्त जिले" का चयन करें ताकि आसपास के अवसर दिख सकें।'}
+              {currentLang === 'en'
+                ? 'Sync your exact GPS coordinates to fetch live AI-generated job & self-employment opportunities for your area.'
+                : 'अपनी सटीक GPS लोकेशन सिंक करें या AI ताज़ा करें ताकि आपके क्षेत्र के लाइव रोजगार और स्वरोजगार अवसर लोड हो सकें।'}
             </p>
-            <div className="pt-2 flex items-center justify-center gap-2">
+            <div className="pt-2 flex items-center justify-center gap-2 flex-wrap">
               <button
                 type="button"
-                onClick={() => handleSelectDistrictChange('all')}
-                className="min-h-[40px] px-4 py-2 rounded-xl bg-[#245A91] text-white text-xs font-bold hover:bg-[#17365D]"
+                onClick={handleAutoDetectCurrentLocation}
+                className="min-h-[40px] px-4 py-2 rounded-xl bg-[#287D73] text-white text-xs font-bold hover:bg-[#17365D] inline-flex items-center gap-1.5"
               >
-                समस्त जिले के अवसर देखें
+                <Icon name="pin" size={14} />
+                {currentLang === 'en' ? 'Sync GPS & Fetch Live AI' : 'GPS सिंक करें व लाइव AI लाएं'}
               </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveTab('all');
-                  setSearchQuery('');
-                }}
-                className="min-h-[40px] px-4 py-2 rounded-xl bg-white border border-[#DCE3EA] text-xs font-bold text-[#17365D]"
-              >
-                फ़िल्टर रीसेट करें
-              </button>
+              {onRefreshAi && (
+                <button
+                  type="button"
+                  onClick={() => onRefreshAi(liveCoords)}
+                  className="min-h-[40px] px-4 py-2 rounded-xl bg-[#245A91] text-white text-xs font-bold hover:bg-[#17365D]"
+                >
+                  {currentLang === 'en' ? 'Refresh AI Data' : 'AI डेटा ताज़ा करें'}
+                </button>
+              )}
+              {(activeTab !== 'all' || searchQuery) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('all');
+                    setSearchQuery('');
+                  }}
+                  className="min-h-[40px] px-4 py-2 rounded-xl bg-white border border-[#DCE3EA] text-xs font-bold text-[#17365D]"
+                >
+                  फ़िल्टर रीसेट करें
+                </button>
+              )}
             </div>
           </div>
         )}

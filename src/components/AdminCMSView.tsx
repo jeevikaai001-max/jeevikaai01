@@ -16,6 +16,7 @@ import {
   AdminActivityAction,
 } from '../services/firebase';
 import { mediaStorageService, uploadToCloudinary } from '../services/cloudinaryService';
+import appletConfig from '../../firebase-applet-config.json';
 
 interface AdminCMSViewProps {
   currentUser?: AppUser | null;
@@ -177,8 +178,34 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
     const unsub = mediaStorageService.subscribeMediaAssets((liveAssets) => {
       setMediaAssets(liveAssets);
     });
+    const unsubJobs = contentService.subscribe<Opportunity>('opportunities', (liveJobs) => {
+      if (liveJobs.length > 0) {
+        setOpportunities((prev) => {
+          const map = new Map<string, Opportunity>();
+          liveJobs.forEach((j) => map.set(j.id, j));
+          prev.forEach((j) => {
+            if (!map.has(j.id)) map.set(j.id, j);
+          });
+          return Array.from(map.values());
+        });
+      }
+    });
+    const unsubPaths = contentService.subscribe<Pathway>('pathways', (livePaths) => {
+      if (livePaths.length > 0) {
+        setPathways((prev) => {
+          const map = new Map<string, Pathway>();
+          livePaths.forEach((p) => map.set(p.id, p));
+          prev.forEach((p) => {
+            if (!map.has(p.id)) map.set(p.id, p);
+          });
+          return Array.from(map.values());
+        });
+      }
+    });
     return () => {
       unsub();
+      unsubJobs();
+      unsubPaths();
     };
   }, []);
 
@@ -1924,8 +1951,16 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
                           <button
                             onClick={() => {
                               setPathways((prev) => prev.filter((p) => p.id !== path.id));
+                              contentService.remove('pathways', path.id);
+                              logActivity(
+                                'DELETE',
+                                'pathways',
+                                `${path.name} (${path.hi})`,
+                                `Removed NSQF Level ${path.nsqf} pathway`,
+                                path.id
+                              );
                               setConfirmActionKey(null);
-                              onNotify('Pathway removed.');
+                              onNotify('Pathway removed from Firestore.');
                             }}
                             className="px-2.5 py-1 rounded bg-[#9E2A2B] text-white font-bold text-[11px]"
                           >
@@ -2735,7 +2770,7 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
           {activeTab === 'sub_admins' && (
             <div className="space-y-5">
               {subAdminRulesError && (
-                <div className="bg-[#FFF8EB] border border-[#D9822B]/40 rounded-2xl p-4 text-xs text-[#7C4A03] space-y-1.5">
+                <div className="bg-[#FFF8EB] border border-[#D9822B]/40 rounded-2xl p-4 text-xs text-[#7C4A03] space-y-2">
                   <div className="font-extrabold flex items-center gap-1.5 text-[#9A5B04]">
                     <Icon name="info" size={15} />
                     <span>Firebase Firestore Rules पब्लिश करना आवश्यक है (Rules Deployment Notice)</span>
@@ -2743,6 +2778,15 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
                   <p className="leading-relaxed">
                     सब-एडमिन और 7-दिन एक्टिविटी लॉग्स को लाइव Firestore में सेव करने के लिए कृपया अपने प्रोजेक्ट की अपडेटेड <code className="px-1.5 py-0.5 bg-white rounded border border-[#D9822B]/30 font-mono">firestore.rules</code> फाइल को Firebase Console → Firestore Database → Rules में पब्लिश करें।
                   </p>
+                  <a
+                    href={`https://console.firebase.google.com/project/${appletConfig.projectId}/firestore/databases/${appletConfig.firestoreDatabaseId}/rules`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#D9822B] hover:bg-[#B86A1E] text-white font-bold text-[11px] transition-colors"
+                  >
+                    <Icon name="external" size={13} />
+                    <span>Firebase Firestore Rules खोलें (Open Console)</span>
+                  </a>
                 </div>
               )}
 

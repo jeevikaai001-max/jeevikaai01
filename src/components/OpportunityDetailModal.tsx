@@ -28,13 +28,14 @@ export const OpportunityDetailModal: React.FC<OpportunityDetailModalProps> = ({
 
   if (!opp) return null;
 
+  const liveGps = locationIntelligenceService.getLiveGpsCoordinates();
   const accuracy = locationIntelligenceService.getLocationAccuracy();
-  const userLat = accuracy.latitude || locationData?.latitude || 27.1446;
-  const userLng = accuracy.longitude || locationData?.longitude || 83.5622;
+  const userLat = liveGps?.latitude ?? accuracy.latitude ?? locationData?.latitude ?? 22.9734;
+  const userLng = liveGps?.longitude ?? accuracy.longitude ?? locationData?.longitude ?? 78.6569;
 
-  const districtName = locationData?.district || activeLocation?.split(',')[0]?.trim() || 'Maharajganj';
-  const stateName = locationData?.state || activeLocation?.split(',')[1]?.trim() || 'Uttar Pradesh';
-  const userOriginLabel = activeLocation || `${districtName}, ${stateName}`;
+  const districtName = locationData?.district || activeLocation?.split(',')[0]?.trim() || '';
+  const stateName = locationData?.state || activeLocation?.split(',')[1]?.trim() || 'India';
+  const userOriginLabel = activeLocation || [districtName, stateName].filter(Boolean).join(', ');
 
   const kmDistance = typeof opp.km === 'number' && opp.km > 0 ? opp.km : 4;
   const hashSeed = (opp.id || opp.title).split('').reduce((acc, ch) => acc + ch.charCodeAt(0), 0);
@@ -43,10 +44,12 @@ export const OpportunityDetailModal: React.FC<OpportunityDetailModalProps> = ({
   const destLat = Number((userLat + Math.sin(angleRad) * degOffset).toFixed(5));
   const destLng = Number((userLng + Math.cos(angleRad) * degOffset).toFixed(5));
 
-  const destinationQuery = `${opp.title}, ${opp.loc}, ${districtName}, ${stateName}`;
-  const hasExactGps = Boolean(accuracy.latitude && accuracy.longitude);
+  const destinationQuery = [opp.title, opp.loc, districtName, stateName].filter(Boolean).join(', ');
+  const exactLat = liveGps?.latitude ?? accuracy.latitude ?? locationData?.latitude;
+  const exactLng = liveGps?.longitude ?? accuracy.longitude ?? locationData?.longitude;
+  const hasExactGps = typeof exactLat === 'number' && typeof exactLng === 'number';
   const originParam = hasExactGps
-    ? `${accuracy.latitude},${accuracy.longitude}`
+    ? `${exactLat},${exactLng}`
     : encodeURIComponent(userOriginLabel);
 
   const googleMapsDirectionsUrl = `https://www.google.com/maps/dir/?api=1&origin=${originParam}&destination=${encodeURIComponent(

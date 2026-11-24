@@ -10,7 +10,11 @@ import {
 import { DEMO, JOBS } from './data/mockData';
 import { storageService } from './services/storageService';
 import { authService, AppUser, firestoreService } from './services/firebase';
-import { locationIntelligenceService } from './services/locationIntelligenceService';
+import {
+  locationIntelligenceService,
+  LocationDetectionResult,
+  GpsCoordinates,
+} from './services/locationIntelligenceService';
 import { mediaStorageService } from './services/cloudinaryService';
 import { aiGateway } from './services/aiGateway';
 import { Navbar } from './components/Navbar';
@@ -86,7 +90,7 @@ export function App() {
   const [analysisStep, setAnalysisStep] = useState<number>(1);
 
   const [activeLocation, setActiveLocation] = useState<string>(() => {
-    return storageService.loadProfile()?.location || locationIntelligenceService.getActiveLocation() || 'Maharajganj, Uttar Pradesh';
+    return storageService.loadProfile()?.location || locationIntelligenceService.getActiveLocation() || '';
   });
   const [locationData, setLocationData] = useState<LocationLivelihoodData | null>(() => {
     const initialProfileLoc = storageService.loadProfile()?.location;
@@ -146,16 +150,19 @@ export function App() {
     const unsub = locationIntelligenceService.subscribe((data) => {
       if (active) setLocationData(data);
     });
+    const liveCoords = locationIntelligenceService.getLiveGpsCoordinates();
     const locToFetch = profile?.location?.trim() || activeLocation;
     if (profile?.location && profile.location.trim() !== activeLocation) {
       setActiveLocation(profile.location.trim());
     }
-    setIsRefreshingLocationData(true);
-    locationIntelligenceService
-      .fetchLocationData(locToFetch, currentLang, profile)
-      .finally(() => {
-        if (active) setIsRefreshingLocationData(false);
-      });
+    if (liveCoords || locToFetch) {
+      setIsRefreshingLocationData(true);
+      locationIntelligenceService
+        .fetchLocationData(locToFetch || undefined, currentLang, profile, Boolean(liveCoords), liveCoords)
+        .finally(() => {
+          if (active) setIsRefreshingLocationData(false);
+        });
+    }
     return () => {
       active = false;
       unsub();
@@ -163,40 +170,55 @@ export function App() {
   }, [profile?.location, activeLocation, currentLang]);
 
   useEffect(() => {
-    const accuracy = locationIntelligenceService.getLocationAccuracy();
-    if (hasAutoDetectedGpsRef.current || (accuracy.source === 'gps' && accuracy.latitude)) {
+    if (hasAutoDetectedGpsRef.current) {
       return;
     }
 
     if (['dashboard', 'opportunities', 'training', 'skill-gap', 'saved'].includes(currentView)) {
       hasAutoDetectedGpsRef.current = true;
+      setIsRefreshingLocationData(true);
       locationIntelligenceService
         .detectGpsLocation()
         .then(async (detected) => {
-          if (detected && detected.location) {
+          if (detected && typeof detected.latitude === 'number' && typeof detected.longitude === 'number') {
+            const coords: GpsCoordinates = {
+              latitude: detected.latitude,
+              longitude: detected.longitude,
+              accuracyMeters: detected.accuracyMeters,
+            };
             setActiveLocation(detected.location);
             locationIntelligenceService.setActiveLocation(detected.location);
-            setProfile((prev) => {
-              if (!prev) return prev;
-              const updatedProf = {
-                ...prev,
+            let nextProfile: BeneficiaryProfile | null = profile;
+            if (profile) {
+              nextProfile = {
+                ...profile,
                 location: detected.location,
+                latitude: detected.latitude,
+                longitude: detected.longitude,
                 locationAccuracy: detected.accuracyLevel,
                 locationConfidence: detected.confidenceScore,
                 locationAccuracyMeters: detected.accuracyMeters,
               };
-              storageService.saveProfile(updatedProf);
-              return updatedProf;
-            });
+              setProfile(nextProfile);
+              storageService.saveProfile(nextProfile);
+              firestoreService.syncLocalProfileToFirestore(nextProfile).catch(() => {});
+            }
             const fresh = await locationIntelligenceService.fetchLocationData(
               detected.location,
               currentLang,
-              profile
+              nextProfile,
+              true,
+              coords
             );
             setLocationData(fresh);
           }
         })
-        .catch(() => {});
+        .catch(() => {
+          // Permission denied or unavailable; allow manual district or retry
+        })
+        .finally(() => {
+          setIsRefreshingLocationData(false);
+        });
     }
   }, [currentView]);
 
@@ -282,14 +304,39 @@ export function App() {
     setCurrentView('dashboard');
     window.scrollTo({ top: 0, behavior: 'instant' });
 
-    const targetLoc = (newProfile.location && newProfile.location.trim())
-      ? newProfile.location.trim()
-      : (activeLocation || 'Maharajganj, Uttar Pradesh');
-    setActiveLocation(targetLoc);
-    locationIntelligenceService.setActiveLocation(targetLoc);
+    const liveCoords =
+      typeof newProfile.latitude === 'number' && typeof newProfile.longitude === 'number'
+        ? {
+            latitude: newProfile.latitude,
+            longitude: newProfile.longitude,
+            accuracyMeters: newProfile.locationAccuracyMeters,
+          }
+        : locationIntelligenceService.getLiveGpsCoordinates();
 
-    setProfile(newProfile);
-    await storageService.saveProfile(newProfile);
+    const targetLoc =
+      (newProfile.location && newProfile.location.trim()) ||
+      activeLocation ||
+      locationIntelligenceService.getActiveLocation();
+
+    if (targetLoc) {
+      setActiveLocation(targetLoc);
+      locationIntelligenceService.setActiveLocation(targetLoc);
+    }
+
+    const enrichedInputProfile: BeneficiaryProfile = {
+      ...newProfile,
+      location: targetLoc,
+      ...(liveCoords
+        ? {
+            latitude: liveCoords.latitude,
+            longitude: liveCoords.longitude,
+            locationAccuracyMeters: liveCoords.accuracyMeters,
+          }
+        : {}),
+    };
+
+    setProfile(enrichedInputProfile);
+    await storageService.saveProfile(enrichedInputProfile);
 
     try {
       localStorage.removeItem('jeevika_current_step_v1');
@@ -302,12 +349,18 @@ export function App() {
     const step1Timer = setTimeout(() => setAnalysisStep(2), 500);
     const step2Timer = setTimeout(() => setAnalysisStep(3), 1000);
 
-    let analyzedProfile = { ...newProfile };
+    let analyzedProfile = { ...enrichedInputProfile };
 
     try {
       const [profileAnalysisRes, locationDataRes] = await Promise.allSettled([
-        aiGateway.analyzeProfile({ profile: newProfile, language: currentLang }),
-        locationIntelligenceService.fetchLocationData(targetLoc, currentLang, newProfile, true),
+        aiGateway.analyzeProfile({ profile: enrichedInputProfile, language: currentLang }),
+        locationIntelligenceService.fetchLocationData(
+          targetLoc || undefined,
+          currentLang,
+          enrichedInputProfile,
+          true,
+          liveCoords
+        ),
       ]);
 
       if (profileAnalysisRes.status === 'fulfilled' && profileAnalysisRes.value?.analysis) {
@@ -320,6 +373,9 @@ export function App() {
 
       if (locationDataRes.status === 'fulfilled' && locationDataRes.value) {
         setLocationData(locationDataRes.value);
+        if (locationDataRes.value.location) {
+          setActiveLocation(locationDataRes.value.location);
+        }
       }
     } catch {}
 
@@ -330,27 +386,41 @@ export function App() {
     setProfile(analyzedProfile);
     setIsAnalyzingProfile(false);
 
+    const labelLoc = analyzedProfile.location || locationData?.location || 'your GPS area';
     notify(
       currentLang === 'bho'
-        ? `रोडमैप तैयार भइल! ${analyzedProfile.name} खातिर ${targetLoc} के अनुसार अवसर लोड हो गइल बा।`
+        ? `रोडमैप तैयार भइल! ${analyzedProfile.name} खातिर ${labelLoc} के अनुसार लाइव AI अवसर लोड हो गइल बा।`
         : currentLang === 'en'
-        ? `Personalized dashboard ready for ${analyzedProfile.name} with opportunities in ${targetLoc}!`
-        : `रोडमैप तैयार हुआ! ${analyzedProfile.name} के लिए ${targetLoc} के अवसर लोड हो गए हैं।`
+        ? `Personalized dashboard ready for ${analyzedProfile.name} with live AI opportunities in ${labelLoc}!`
+        : `रोडमैप तैयार हुआ! ${analyzedProfile.name} के लिए ${labelLoc} के लाइव AI अवसर लोड हो गए हैं।`
     );
   };
 
   const handleLoadDemoBeneficiary = async () => {
-    const demoProf = { ...DEMO, location: activeLocation || DEMO.location };
+    const liveCoords = locationIntelligenceService.getLiveGpsCoordinates();
+    const demoProf: BeneficiaryProfile = {
+      ...DEMO,
+      location: activeLocation || '',
+      ...(liveCoords ? { latitude: liveCoords.latitude, longitude: liveCoords.longitude } : {}),
+    };
     setProfile(demoProf);
     storageService.saveProfile(demoProf);
     navigateTo('dashboard');
 
+    setIsRefreshingLocationData(true);
     try {
       const detected = await locationIntelligenceService.detectGpsLocation();
-      if (detected && detected.location) {
-        const syncedDemo = {
+      if (detected && typeof detected.latitude === 'number' && typeof detected.longitude === 'number') {
+        const coords: GpsCoordinates = {
+          latitude: detected.latitude,
+          longitude: detected.longitude,
+          accuracyMeters: detected.accuracyMeters,
+        };
+        const syncedDemo: BeneficiaryProfile = {
           ...demoProf,
           location: detected.location,
+          latitude: detected.latitude,
+          longitude: detected.longitude,
           locationAccuracy: detected.accuracyLevel,
           locationConfidence: detected.confidenceScore,
           locationAccuracyMeters: detected.accuracyMeters,
@@ -361,14 +431,22 @@ export function App() {
         const fresh = await locationIntelligenceService.fetchLocationData(
           detected.location,
           currentLang,
-          syncedDemo
+          syncedDemo,
+          true,
+          coords
         );
         setLocationData(fresh);
-        notify(`डेमो प्रोफ़ाइल आपकी वर्तमान लोकेशन (${detected.location}) के साथ सिंक हो गई है!`);
+        notify(`प्रोफ़ाइल आपकी सटीक GPS लोकेशन (${detected.location}) के लाइव AI डेटा से सिंक हो गई है!`);
         return;
       }
-    } catch {}
-    notify(`डेमो प्रोफ़ाइल लोड हो गई (${demoProf.location})।`);
+    } catch {} finally {
+      setIsRefreshingLocationData(false);
+    }
+    notify(
+      demoProf.location
+        ? `प्रोफ़ाइल लोड हो गई (${demoProf.location})। सटीक डेटा के लिए GPS सिंक करें।`
+        : 'प्रोफ़ाइल लोड हो गई। अपने क्षेत्र का लाइव AI डेटा पाने के लिए GPS सिंक करें।'
+    );
   };
 
   const handleShortlistToggle = (id: string, item?: Opportunity) => {
@@ -482,21 +560,37 @@ export function App() {
     } catch {}
   };
 
-  const handleLocationChange = async (newLocation: string) => {
+  const handleLocationChange = async (newLocation: string, detected?: LocationDetectionResult) => {
     const cleanedLoc = newLocation.trim();
-    if (!cleanedLoc) return;
-    setActiveLocation(cleanedLoc);
+    const coords: GpsCoordinates | undefined =
+      detected && typeof detected.latitude === 'number' && typeof detected.longitude === 'number'
+        ? {
+            latitude: detected.latitude,
+            longitude: detected.longitude,
+            accuracyMeters: detected.accuracyMeters,
+          }
+        : undefined;
+
+    if (!cleanedLoc && !coords) return;
+
+    const resolvedLabel = cleanedLoc || detected?.location || '';
+    if (resolvedLabel) {
+      setActiveLocation(resolvedLabel);
+      locationIntelligenceService.setActiveLocation(resolvedLabel);
+    }
+
     const accuracy = locationIntelligenceService.getLocationAccuracy();
-    locationIntelligenceService.setActiveLocation(cleanedLoc);
 
     let nextProfile: BeneficiaryProfile | null = profile;
     if (profile) {
       nextProfile = {
         ...profile,
-        location: cleanedLoc,
-        locationAccuracy: accuracy.level,
-        locationConfidence: accuracy.confidenceScore,
-        locationAccuracyMeters: accuracy.accuracyMeters,
+        location: resolvedLabel || profile.location,
+        latitude: coords ? coords.latitude : undefined,
+        longitude: coords ? coords.longitude : undefined,
+        locationAccuracy: detected?.accuracyLevel || accuracy.level,
+        locationConfidence: detected?.confidenceScore || accuracy.confidenceScore,
+        locationAccuracyMeters: coords?.accuracyMeters ?? accuracy.accuracyMeters,
       };
       setProfile(nextProfile);
       storageService.saveProfile(nextProfile);
@@ -506,54 +600,101 @@ export function App() {
     setIsRefreshingLocationData(true);
     try {
       const fresh = await locationIntelligenceService.fetchLocationData(
-        cleanedLoc,
+        resolvedLabel || undefined,
         currentLang,
         nextProfile,
-        true
+        true,
+        coords
       );
       setLocationData(fresh);
+      if (fresh.location) {
+        setActiveLocation(fresh.location);
+      }
+      const displayLoc = fresh.location || resolvedLabel;
       notify(
         fresh.isAiGenerated
           ? currentLang === 'bho'
-            ? `AI से ${cleanedLoc} के लाइव डेटा अपडेट हो गइल!`
+            ? `GPS व AI से ${displayLoc} के लाइव डेटा अपडेट हो गइल!`
             : currentLang === 'en'
-            ? `Live AI data loaded for ${cleanedLoc}!`
-            : `AI से ${cleanedLoc} का लाइव डेटा अपडेट हो गया!`
-          : currentLang === 'bho'
-          ? `स्थान बदलल गइल: ${cleanedLoc}`
+            ? `Live AI data loaded for ${displayLoc}!`
+            : `AI से ${displayLoc} का लाइव डेटा अपडेट हो गया!`
           : currentLang === 'en'
-          ? `Location updated to: ${cleanedLoc}`
-          : `स्थान अपडेट हुआ: ${cleanedLoc}`
+          ? `Location set to ${displayLoc}, but live AI is currently unreachable. Tap Refresh to retry.`
+          : `स्थान ${displayLoc} पर सेट हुआ, लेकिन लाइव AI अभी उपलब्ध नहीं है। पुनः प्रयास करें।`
       );
     } catch {} finally {
       setIsRefreshingLocationData(false);
     }
   };
 
-  const handleRefreshLocationAi = async () => {
-    const targetLoc = profile?.location?.trim() || activeLocation;
+  const handleRefreshLocationAi = async (coordsOverride?: GpsCoordinates) => {
     setIsRefreshingLocationData(true);
     try {
+      let resolvedCoords: GpsCoordinates | undefined =
+        coordsOverride || locationIntelligenceService.getLiveGpsCoordinates();
+      let targetLoc = profile?.location?.trim() || activeLocation;
+      let nextProfile: BeneficiaryProfile | null = profile;
+
+      // Strictly prioritize fresh GPS coordinates if not yet captured in this session
+      if (!resolvedCoords) {
+        try {
+          const detected = await locationIntelligenceService.detectGpsLocation();
+          if (detected && typeof detected.latitude === 'number' && typeof detected.longitude === 'number') {
+            resolvedCoords = {
+              latitude: detected.latitude,
+              longitude: detected.longitude,
+              accuracyMeters: detected.accuracyMeters,
+            };
+            targetLoc = detected.location;
+            setActiveLocation(detected.location);
+            if (profile) {
+              nextProfile = {
+                ...profile,
+                location: detected.location,
+                latitude: detected.latitude,
+                longitude: detected.longitude,
+                locationAccuracy: detected.accuracyLevel,
+                locationConfidence: detected.confidenceScore,
+                locationAccuracyMeters: detected.accuracyMeters,
+              };
+              setProfile(nextProfile);
+              storageService.saveProfile(nextProfile);
+            }
+          }
+        } catch {
+          // GPS denied/unavailable; fall through to current targetLoc
+        }
+      }
+
       const fresh = await locationIntelligenceService.fetchLocationData(
-        targetLoc,
+        targetLoc || undefined,
         currentLang,
-        profile,
-        true
+        nextProfile,
+        true,
+        resolvedCoords
       );
       setLocationData(fresh);
+      if (fresh.location) {
+        setActiveLocation(fresh.location);
+      }
+      const label = fresh.district || fresh.location || targetLoc || 'your area';
       notify(
         fresh.isAiGenerated
           ? currentLang === 'bho'
-            ? `AI से ${fresh.district} के लाइव डेटा अपडेट हो गइल!`
+            ? `AI से ${label} के लाइव डेटा अपडेट हो गइल!`
             : currentLang === 'en'
-            ? `Live Gemini AI data refreshed for ${fresh.district}!`
-            : `AI द्वारा ${fresh.district} का लाइव डेटा सफलतापूर्वक लोड हुआ!`
+            ? `Live Gemini AI data refreshed for ${label}!`
+            : `AI द्वारा ${label} का लाइव डेटा सफलतापूर्वक लोड हुआ!`
           : currentLang === 'en'
-          ? `Could not reach live AI right now; showing ${fresh.district} local data.`
-          : `लाइव AI अभी व्यस्त है, ${fresh.district} का स्थानीय डेटा दिखाया जा रहा है।`
+          ? `Live AI could not respond right now for ${label}. Please tap Refresh again.`
+          : `${label} के लिए लाइव AI अभी उत्तर नहीं दे सका। कृपया पुनः ताज़ा करें।`
       );
     } catch {
-      notify('Local district data is active.');
+      notify(
+        currentLang === 'en'
+          ? 'Could not reach live AI service right now. Please try again.'
+          : 'लाइव AI सेवा अभी उपलब्ध नहीं है। कृपया पुनः प्रयास करें।'
+      );
     } finally {
       setIsRefreshingLocationData(false);
     }
@@ -682,7 +823,26 @@ export function App() {
     navigateTo('home');
   };
 
-  const activeProfile = profile || { ...DEMO, location: activeLocation, isDemo: true };
+  const liveGpsForProfile = locationIntelligenceService.getLiveGpsCoordinates();
+  const activeProfile: BeneficiaryProfile = profile
+    ? {
+        ...profile,
+        ...(liveGpsForProfile && typeof profile.latitude !== 'number'
+          ? {
+              latitude: liveGpsForProfile.latitude,
+              longitude: liveGpsForProfile.longitude,
+              locationAccuracyMeters: liveGpsForProfile.accuracyMeters,
+            }
+          : {}),
+      }
+    : {
+        ...DEMO,
+        location: activeLocation,
+        latitude: liveGpsForProfile?.latitude,
+        longitude: liveGpsForProfile?.longitude,
+        locationAccuracyMeters: liveGpsForProfile?.accuracyMeters,
+        isDemo: true,
+      };
 
   return (
     <div className="min-h-screen flex flex-col bg-[#F7F9FC] text-[#202B36]">

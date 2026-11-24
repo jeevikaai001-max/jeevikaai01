@@ -608,16 +608,32 @@ app.post('/api/generate-location-data', async (req: Request, res: Response) => {
     const locality = clampStr(req.body?.locality, 80);
     const pincode = clampStr(req.body?.pincode, 12);
     const language = clampStr(req.body?.language, 8) || 'hi';
+    const rawLat = Number(req.body?.latitude);
+    const rawLng = Number(req.body?.longitude);
+    const hasValidCoords =
+      Number.isFinite(rawLat) &&
+      Number.isFinite(rawLng) &&
+      rawLat >= -90 &&
+      rawLat <= 90 &&
+      rawLng >= -180 &&
+      rawLng <= 180 &&
+      !(rawLat === 0 && rawLng === 0);
+    const rawAcc = Number(req.body?.accuracyMeters);
+    const accuracyMeters = Number.isFinite(rawAcc) && rawAcc > 0 ? Math.min(50000, Math.round(rawAcc)) : null;
+    const coordinateSource = clampStr(req.body?.coordinateSource, 20) || (hasValidCoords ? 'gps' : 'manual');
     const existingProfile =
       req.body?.existingProfile && typeof req.body.existingProfile === 'object' ? req.body.existingProfile : {};
 
-    const targetLoc = location || [locality, district, state].filter(Boolean).join(', ') || 'Maharajganj, Uttar Pradesh';
+    const targetLoc =
+      location ||
+      [locality, district, state].filter(Boolean).join(', ') ||
+      (hasValidCoords ? `GPS (${rawLat.toFixed(5)}, ${rawLng.toFixed(5)})` : 'India');
 
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
       return res.json({
         fallback: true,
-        message: 'GEMINI_API_KEY not configured, utilizing curated district database.',
+        message: 'GEMINI_API_KEY not configured.',
       });
     }
 
@@ -634,21 +650,26 @@ app.post('/api/generate-location-data', async (req: Request, res: Response) => {
     const langLabel =
       language === 'bho' ? 'Bhojpuri & simple Hindi' : language === 'en' ? 'English' : 'simple Hindi';
 
+    const gpsLine = hasValidCoords
+      ? `EXACT GPS COORDINATES (STRICT PRIORITY - ${coordinateSource.toUpperCase()}): Latitude ${rawLat.toFixed(6)}, Longitude ${rawLng.toFixed(6)}${accuracyMeters ? ` (±${accuracyMeters}m radius)` : ''}`
+      : 'GPS Coordinates: Not provided (use district/state strictly)';
+
     const ai = createAiClient();
     const prompt = `You are the Live Hyperlocal Livelihood Intelligence Engine for JeevikaAI in India.
+${gpsLine}
 Target Exact Area: "${targetLoc}"
-Locality/Village/Town: "${locality || 'Not specified'}"
-District: "${district || 'Not specified'}"
-State: "${state || 'Not specified'}"
+Locality/Village/Town: "${locality || 'Resolve from GPS coordinates'}"
+District: "${district || 'Resolve from GPS coordinates'}"
+State: "${state || 'Resolve from GPS coordinates'}"
 Pincode: "${pincode || 'Not specified'}"
 Preferred Output Language: ${langLabel}
 Personalized User Profile: ${JSON.stringify(safeProfile)}
 
 CRITICAL ACCURACY RULES:
-1. Every single job, self-employment option, training center, and government scheme MUST be grounded strictly in "${targetLoc}" (${district || targetLoc}, ${state || 'India'}). NEVER return data from another city or state.
+1. STRICTLY prioritize the exact GPS coordinates (${hasValidCoords ? `${rawLat.toFixed(5)}, ${rawLng.toFixed(5)}` : targetLoc}). Every single job, self-employment option, training center, and government scheme MUST be grounded in the exact locality, district, and state at those coordinates. NEVER return generic demo data or data from another district/state.
 2. Personalize the ranking and relevance to the user's education ("${safeProfile.education || '10th/12th'}"), skills ("${safeProfile.skills || 'General'}"), interests ("${safeProfile.interests || 'Local Livelihood'}"), and workType ("${safeProfile.workType || 'Either'}").
-3. If a village/town/locality is given, mention realistic nearby block/tehsil/market landmarks and accurate distances ("km" integer between 1 and 35).
-4. Include real state-specific schemes for "${state || 'the user state'}" alongside Central schemes (e.g., PM Vishwakarma, PMKVY 4.0, PM Mudra, PMEGP, UP ODOP / Bihar Mukhyamantri Udyami / MP Udyam Kranti / Maharashtra CMEGP / Rajasthan Yuva Sambal, etc. matching the actual state!).
+3. Compute realistic nearby block/tehsil/market/industrial landmarks and accurate distances ("km" integer between 1 and 35) relative to the exact GPS coordinates/locality.
+4. Include real state-specific schemes for "${state || 'the exact state at these coordinates'}" alongside Central schemes (e.g., PM Vishwakarma, PMKVY 4.0, PM Mudra, PMEGP, plus the actual state's flagship youth/livelihood scheme).
 5. Write descriptions, benefits, eligibility, and summary naturally in ${langLabel}.
 
 Return ONLY valid JSON matching this structure without markdown formatting:

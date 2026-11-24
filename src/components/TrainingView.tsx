@@ -1,11 +1,15 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Icon } from './Icons';
 import { Opportunity, SupportedLanguage, LocationLivelihoodData, BeneficiaryProfile } from '../types';
-import { JOBS } from '../data/mockData';
 import { t } from '../services/translationService';
 import { contentService, OperationType, handleFirestoreError } from '../services/firebase';
 import { speechService } from '../services/speechService';
-import { POPULAR_INDIAN_REGIONS, locationIntelligenceService } from '../services/locationIntelligenceService';
+import {
+  POPULAR_INDIAN_REGIONS,
+  locationIntelligenceService,
+  LocationDetectionResult,
+  GpsCoordinates,
+} from '../services/locationIntelligenceService';
 
 interface TrainingViewProps {
   onShortlistToggle: (id: string, item?: Opportunity) => void;
@@ -14,8 +18,8 @@ interface TrainingViewProps {
   go: (route: string) => void;
   currentLang: SupportedLanguage;
   locationData?: LocationLivelihoodData | null;
-  onLocationChange?: (newLoc: string) => void;
-  onRefreshAi?: () => Promise<void>;
+  onLocationChange?: (newLoc: string, detected?: LocationDetectionResult) => void;
+  onRefreshAi?: (coords?: GpsCoordinates) => Promise<void>;
   isRefreshingAi?: boolean;
   userProfile?: BeneficiaryProfile | null;
 }
@@ -56,13 +60,34 @@ export const TrainingView: React.FC<TrainingViewProps> = ({
     if (userProfile?.location) {
       const parts = userProfile.location.split(',').map((p) => p.trim()).filter(Boolean);
       const dist = parts.length >= 3 ? parts[parts.length - 2] : parts[0];
-      return dist || 'Maharajganj';
+      return dist || '';
     }
-    return 'Maharajganj';
+    return '';
   }, [locationData?.district, userProfile?.location]);
 
   const [selectedDistrict, setSelectedDistrict] = useState<string>(initialDistrict);
   const [showDistrictModal, setShowDistrictModal] = useState<boolean>(false);
+  const hasTriggeredMountAiRef = useRef<boolean>(false);
+
+  const liveCoords = useMemo<GpsCoordinates | undefined>(() => {
+    const gps = locationIntelligenceService.getLiveGpsCoordinates();
+    if (gps) return gps;
+    if (typeof locationData?.latitude === 'number' && typeof locationData?.longitude === 'number') {
+      return {
+        latitude: locationData.latitude,
+        longitude: locationData.longitude,
+        accuracyMeters: locationData.accuracyMeters,
+      };
+    }
+    if (typeof userProfile?.latitude === 'number' && typeof userProfile?.longitude === 'number') {
+      return {
+        latitude: userProfile.latitude,
+        longitude: userProfile.longitude,
+        accuracyMeters: userProfile.locationAccuracyMeters,
+      };
+    }
+    return undefined;
+  }, [locationData?.latitude, locationData?.longitude, locationData?.accuracyMeters, userProfile?.latitude, userProfile?.longitude, userProfile?.locationAccuracyMeters]);
 
   useEffect(() => {
     if (locationData?.district && locationData.district !== selectedDistrict) {
@@ -72,15 +97,30 @@ export const TrainingView: React.FC<TrainingViewProps> = ({
     }
   }, [locationData?.district, initialDistrict]);
 
+  // Force an AI-driven refresh anchored to captured GPS coordinates if view opens without live AI data
+  useEffect(() => {
+    if (hasTriggeredMountAiRef.current || isRefreshingAi || isDetectingGps) return;
+    if (!locationData?.isAiGenerated && onRefreshAi) {
+      hasTriggeredMountAiRef.current = true;
+      onRefreshAi(liveCoords).catch(() => {});
+    }
+  }, [locationData?.isAiGenerated, isRefreshingAi, isDetectingGps, liveCoords, onRefreshAi]);
+
   const handleAutoDetectCurrentLocation = async () => {
     if (isDetectingGps) return;
     setIsDetectingGps(true);
     try {
       const detected = await locationIntelligenceService.detectGpsLocation();
-      if (detected && detected.location) {
+      if (detected && typeof detected.latitude === 'number' && typeof detected.longitude === 'number') {
         setSelectedDistrict(detected.district || detected.location.split(',')[0].trim());
         if (onLocationChange) {
-          onLocationChange(detected.location);
+          onLocationChange(detected.location, detected);
+        } else if (onRefreshAi) {
+          await onRefreshAi({
+            latitude: detected.latitude,
+            longitude: detected.longitude,
+            accuracyMeters: detected.accuracyMeters,
+          });
         }
       }
     } catch {
@@ -172,18 +212,7 @@ export const TrainingView: React.FC<TrainingViewProps> = ({
       }
     });
 
-    const hasLiveLocationCenters = list.length > 0;
-    if (!hasLiveLocationCenters) {
-      JOBS.filter((j) => j.type === 'Training').forEach((item) => {
-        const key = `${item.title.toLowerCase().trim()}|${item.org.toLowerCase().trim()}`;
-        if (!seenKeys.has(key) && !seenKeys.has(item.id)) {
-          seenKeys.add(key);
-          seenKeys.add(item.id);
-          list.push({ ...item, type: 'Training', isLiveFirestore: false, fromLocationData: false });
-        }
-      });
-    }
-
+    // Zero static mock/demo JOBS fallback: only live AI locationData + Firestore training centers
     return list;
   }, [firestoreTrainingCenters, locationData]);
 
@@ -329,10 +358,22 @@ export const TrainingView: React.FC<TrainingViewProps> = ({
                   </span>
                 ) : null}
               </div>
-              <div className="text-lg font-extrabold text-[#17365D] flex items-center gap-2 mt-0.5">
+              <div className="text-lg font-extrabold text-[#17365D] flex items-center gap-2 mt-0.5 flex-wrap">
                 <Icon name="pin" size={18} className="text-[#287D73]" />
-                <span>{selectedDistrict === 'all' ? 'समस्त जिले (All India)' : (locationData?.location || selectedDistrict)}</span>
+                <span>
+                  {selectedDistrict === 'all'
+                    ? 'समस्त जिले (All India)'
+                    : locationData?.location ||
+                      selectedDistrict ||
+                      (currentLang === 'en' ? 'Sync GPS to load area' : 'क्षेत्र लोड करने के लिए GPS सिंक करें')}
+                </span>
               </div>
+              {liveCoords && (
+                <div className="text-[11px] font-semibold text-[#245A91] tabular-nums mt-0.5">
+                  GPS: {liveCoords.latitude.toFixed(4)}° N, {liveCoords.longitude.toFixed(4)}° E
+                  {typeof liveCoords.accuracyMeters === 'number' ? ` (±${Math.round(liveCoords.accuracyMeters)}m)` : ''}
+                </div>
+              )}
             </div>
           </div>
 
@@ -368,7 +409,7 @@ export const TrainingView: React.FC<TrainingViewProps> = ({
             {onRefreshAi && (
               <button
                 type="button"
-                onClick={onRefreshAi}
+                onClick={() => onRefreshAi(liveCoords)}
                 disabled={isRefreshingAi}
                 className="min-h-[44px] px-3.5 py-2 rounded-xl bg-[#245A91] hover:bg-[#17365D] text-white text-xs font-bold transition-colors flex items-center gap-1.5 disabled:opacity-60"
               >
@@ -442,10 +483,18 @@ export const TrainingView: React.FC<TrainingViewProps> = ({
       </div>
 
       {/* Loading State (Crisp spinner card — no pulsing gray blocks) */}
-      {isLoadingFirestore && (
+      {(isLoadingFirestore || isRefreshingAi || isDetectingGps) && (
         <div className="bg-[#F7F9FC] border border-[#DCE3EA] rounded-2xl p-8 mb-8 flex items-center justify-center gap-3 text-sm font-bold text-[#17365D]">
           <Icon name="refresh" size={18} className="animate-spin text-[#287D73]" />
-          <span>{currentLang === 'en' ? 'Loading certified training centers...' : 'मान्यता प्राप्त प्रशिक्षण केंद्र लोड हो रहे हैं...'}</span>
+          <span>
+            {isDetectingGps
+              ? currentLang === 'en'
+                ? 'Detecting exact GPS coordinates...'
+                : 'सटीक GPS लोकेशन खोजी जा रही है...'
+              : currentLang === 'en'
+              ? 'Loading live GPS-matched training centers via AI...'
+              : 'आपके GPS क्षेत्र के लिए AI से लाइव प्रशिक्षण केंद्र लोड हो रहे हैं...'}
+          </span>
         </div>
       )}
 
@@ -570,37 +619,52 @@ export const TrainingView: React.FC<TrainingViewProps> = ({
           );
         })}
 
-        {!isLoadingFirestore && filtered.length === 0 && (
+        {!isLoadingFirestore && !isRefreshingAi && !isDetectingGps && filtered.length === 0 && (
           <div className="col-span-full py-16 text-center bg-[#F7F9FC] rounded-2xl border border-[#DCE3EA] p-6 space-y-3">
             <div className="w-12 h-12 rounded-xl bg-white border border-[#DCE3EA] text-[#5F6B76] mx-auto flex items-center justify-center">
               <Icon name="cap" size={24} />
             </div>
             <h3 className="text-base font-bold text-[#17365D]">
-              {selectedDistrict === 'all'
-                ? 'कोई प्रशिक्षण केंद्र नहीं मिला'
-                : `${selectedDistrict} जिले में इस श्रेणी का कोई केंद्र नहीं मिला`}
+              {!selectedDistrict || selectedDistrict === 'all'
+                ? currentLang === 'en'
+                  ? 'No live training centers loaded yet'
+                  : 'अभी कोई लाइव प्रशिक्षण केंद्र लोड नहीं हुआ है'
+                : currentLang === 'en'
+                ? `No live training centers matched for ${selectedDistrict}`
+                : `${selectedDistrict} के लिए अभी कोई लाइव प्रशिक्षण केंद्र नहीं मिला`}
             </h3>
             <p className="text-xs text-[#5F6B76] max-w-md mx-auto">
-              {currentLang === 'bho'
-                ? 'फ़िल्टर बदल के देखीं या नज़दीकी ज़िला के केंद्र देखीं।'
-                : 'फ़िल्टर बदलकर देखें या "समस्त जिले" का चयन करें ताकि आसपास के सरकारी प्रशिक्षण केंद्र दिख सकें।'}
+              {currentLang === 'en'
+                ? 'Sync your exact GPS coordinates to fetch live AI-verified ITI, RSETI, and PMKVY centers near you.'
+                : 'अपनी सटीक GPS लोकेशन सिंक करें या AI ताज़ा करें ताकि आपके क्षेत्र के लाइव सरकारी ITI, RSETI व PMKVY प्रशिक्षण केंद्र लोड हो सकें।'}
             </p>
             <div className="pt-2 flex items-center justify-center gap-2 flex-wrap">
               <button
-                onClick={() => handleSelectDistrictChange('all')}
-                className="min-h-[44px] px-4 py-2 rounded-xl bg-[#287D73] text-white text-xs font-bold hover:bg-[#17365D]"
+                onClick={handleAutoDetectCurrentLocation}
+                className="min-h-[44px] px-4 py-2 rounded-xl bg-[#287D73] text-white text-xs font-bold hover:bg-[#17365D] inline-flex items-center gap-1.5"
               >
-                समस्त जिले के केंद्र देखें
+                <Icon name="crosshair" size={14} />
+                {currentLang === 'en' ? 'Sync GPS & Fetch Live AI' : 'GPS सिंक करें व लाइव AI लाएं'}
               </button>
-              <button
-                onClick={() => {
-                  setFilterPathway('all');
-                  setSearchQuery('');
-                }}
-                className="min-h-[44px] px-4 py-2 rounded-xl bg-white border border-[#DCE3EA] text-xs font-bold text-[#17365D]"
-              >
-                फ़िल्टर रीसेट करें
-              </button>
+              {onRefreshAi && (
+                <button
+                  onClick={() => onRefreshAi(liveCoords)}
+                  className="min-h-[44px] px-4 py-2 rounded-xl bg-[#245A91] text-white text-xs font-bold hover:bg-[#17365D]"
+                >
+                  {currentLang === 'en' ? 'Refresh AI Centers' : 'AI केंद्र ताज़ा करें'}
+                </button>
+              )}
+              {(filterPathway !== 'all' || searchQuery) && (
+                <button
+                  onClick={() => {
+                    setFilterPathway('all');
+                    setSearchQuery('');
+                  }}
+                  className="min-h-[44px] px-4 py-2 rounded-xl bg-white border border-[#DCE3EA] text-xs font-bold text-[#17365D]"
+                >
+                  फ़िल्टर रीसेट करें
+                </button>
+              )}
             </div>
           </div>
         )}

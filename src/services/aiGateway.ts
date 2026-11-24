@@ -113,9 +113,20 @@ export const aiGateway = {
     state: string;
     locality?: string;
     pincode?: string;
+    latitude?: number;
+    longitude?: number;
+    accuracyMeters?: number;
+    coordinateSource?: 'gps' | 'manual' | 'cache' | 'default';
+    forceRefresh?: boolean;
     language: SupportedLanguage;
     existingProfile?: Partial<BeneficiaryProfile> | null;
   }) {
+    const hasCoords =
+      typeof params.latitude === 'number' &&
+      Number.isFinite(params.latitude) &&
+      typeof params.longitude === 'number' &&
+      Number.isFinite(params.longitude);
+
     return postAiRoute<{ fallback?: boolean; result?: any; error?: string }>(
       '/api/generate-location-data',
       {
@@ -124,6 +135,19 @@ export const aiGateway = {
         state: params.state,
         locality: params.locality || '',
         pincode: params.pincode || '',
+        ...(hasCoords
+          ? {
+              latitude: Number(params.latitude!.toFixed(6)),
+              longitude: Number(params.longitude!.toFixed(6)),
+              accuracyMeters:
+                typeof params.accuracyMeters === 'number' && Number.isFinite(params.accuracyMeters)
+                  ? Math.round(params.accuracyMeters)
+                  : undefined,
+            }
+          : {}),
+        coordinateSource: params.coordinateSource || (hasCoords ? 'gps' : 'manual'),
+        forceRefresh: Boolean(params.forceRefresh),
+        requestTs: Date.now(),
         language: params.language,
         existingProfile: params.existingProfile || {},
       },

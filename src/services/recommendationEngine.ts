@@ -1,5 +1,5 @@
 import { BeneficiaryProfile, Pathway, EvaluatedPathway, Opportunity, ScoringFactor } from '../types';
-import { PATHWAYS, EDU, JOBS, STAGE_TITLES } from '../data/mockData';
+import { PATHWAYS, EDU, STAGE_TITLES } from '../data/mockData';
 
 export const mobKey = (v?: string): 'near' | 'district' | 'state' => {
   if (!v) return 'near';
@@ -156,26 +156,12 @@ export function rankJobs(
   ranked: EvaluatedPathway[],
   sourceJobs?: Opportunity[]
 ): Opportunity[] {
-  let jobList: Opportunity[];
-  if (sourceJobs && sourceJobs.length > 0) {
-    jobList = sourceJobs;
-  } else {
-    // Dynamically localize fallback jobs to user's district if sourceJobs is not yet supplied
-    const rawLoc = prof.location ? prof.location.split(',')[0].replace(/ज़िला|जिला|district/gi, '').trim() : '';
-    const userDistrict = rawLoc && rawLoc.toLowerCase() !== 'maharajganj' ? rawLoc : null;
-    jobList = userDistrict
-      ? JOBS.map((j) => ({
-          ...j,
-          loc: j.loc.replace(/Maharajganj town/gi, `${userDistrict} Market`).replace(/Maharajganj/gi, userDistrict),
-          org: j.org.replace(/Maharajganj/gi, userDistrict),
-          source: j.source.replace(/Maharajganj/gi, userDistrict),
-          contactInfo: j.contactInfo ? j.contactInfo.replace(/Maharajganj/gi, userDistrict) : undefined,
-        }))
-      : JOBS;
+  if (!sourceJobs || sourceJobs.length === 0) {
+    return [];
   }
   const sc = Object.fromEntries(ranked.map((p) => [p.id, p.score]));
   const lim = REACH_KM[mobKey(prof.mobility)] ?? 50;
-  return jobList.map((j) => ({
+  return sourceJobs.map((j) => ({
     ...j,
     score: j.score ?? sc[j.path] ?? 50,
     inRange: typeof j.km === 'number' ? j.km <= lim : true

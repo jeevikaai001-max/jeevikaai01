@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { Icon } from './Icons';
 import { SchemeCard } from './SchemeCard';
 import { DistrictMiniMap } from './DistrictMiniMap';
@@ -16,7 +16,13 @@ import { rankPaths, rankJobs, buildSummary, slug } from '../services/recommendat
 import { EDU, WORK, MOB } from '../data/mockData';
 import { speechService } from '../services/speechService';
 import { storageService } from '../services/storageService';
-import { locationIntelligenceService, POPULAR_INDIAN_REGIONS, parseLocationParts } from '../services/locationIntelligenceService';
+import {
+  locationIntelligenceService,
+  POPULAR_INDIAN_REGIONS,
+  parseLocationParts,
+  LocationDetectionResult,
+  GpsCoordinates,
+} from '../services/locationIntelligenceService';
 import {
   mediaStorageService,
   applyAdminSchemeImages,
@@ -34,7 +40,6 @@ import {
   factorNote,
   opportunityTypeLabel,
   distanceLabel,
-  FALLBACK_SCHEMES,
   isEnglishLike,
 } from '../services/dashboardLocale';
 
@@ -47,9 +52,9 @@ interface DashboardProps {
   onOpenSummary: (summaryData: SummaryModalData) => void;
   onSelectDetail: (opp: Opportunity) => void;
   onUpdateProfile?: (updated: BeneficiaryProfile) => void;
-  onLocationChange?: (newLoc: string) => void;
+  onLocationChange?: (newLoc: string, detected?: LocationDetectionResult) => void;
   locationData?: LocationLivelihoodData | null;
-  onRefreshLocationAi?: () => void;
+  onRefreshLocationAi?: (coords?: GpsCoordinates) => void;
   isRefreshingLocationData?: boolean;
   shortlist?: Record<string, boolean>;
   onShortlistToggle?: (id: string, item?: Opportunity) => void;
@@ -186,25 +191,64 @@ export const Dashboard: React.FC<DashboardProps> = ({
     return { level: a.level, confidenceScore: a.confidenceScore, accuracyMeters: a.accuracyMeters, locality: a.locality };
   }, [profile.locationAccuracy, profile.locationConfidence, profile.locationAccuracyMeters, locationData, parsedLoc.locality]);
 
+  const liveCoords = useMemo(() => {
+    const gps = locationIntelligenceService.getLiveGpsCoordinates();
+    if (gps) return gps;
+    if (typeof locationData?.latitude === 'number' && typeof locationData?.longitude === 'number') {
+      return {
+        latitude: locationData.latitude,
+        longitude: locationData.longitude,
+        accuracyMeters: locationData.accuracyMeters,
+      };
+    }
+    if (typeof profile.latitude === 'number' && typeof profile.longitude === 'number') {
+      return {
+        latitude: profile.latitude,
+        longitude: profile.longitude,
+        accuracyMeters: profile.locationAccuracyMeters,
+      };
+    }
+    return undefined;
+  }, [locationData?.latitude, locationData?.longitude, locationData?.accuracyMeters, profile.latitude, profile.longitude, profile.locationAccuracyMeters]);
+
+  const hasTriggeredMountAiRef = useRef<boolean>(false);
+
+  // Force an AI-driven refresh anchored to captured GPS coordinates if Dashboard opens without live AI data
+  useEffect(() => {
+    if (hasTriggeredMountAiRef.current || isRefreshingLocationData || isDetectingLocation) return;
+    if (!locationData?.isAiGenerated && onRefreshLocationAi) {
+      hasTriggeredMountAiRef.current = true;
+      onRefreshLocationAi(liveCoords);
+    }
+  }, [locationData?.isAiGenerated, isRefreshingLocationData, isDetectingLocation, liveCoords, onRefreshLocationAi]);
+
   const handleDetectLocation = async () => {
     if (isDetectingLocation) return;
     setIsDetectingLocation(true);
     onNotify(dt('detecting', L));
     try {
       const res = await locationIntelligenceService.detectGpsLocation();
-      if (res && res.location) {
+      if (res && typeof res.latitude === 'number' && typeof res.longitude === 'number') {
+        const coords: GpsCoordinates = {
+          latitude: res.latitude,
+          longitude: res.longitude,
+          accuracyMeters: res.accuracyMeters,
+        };
         if (onLocationChange) {
-          onLocationChange(res.location);
+          onLocationChange(res.location, res);
         } else {
           onUpdateProfile?.({
             ...profile,
             location: res.location,
+            latitude: res.latitude,
+            longitude: res.longitude,
             locationAccuracy: res.accuracyLevel,
             locationConfidence: res.confidenceScore,
             locationAccuracyMeters: res.accuracyMeters,
           });
+          onRefreshLocationAi?.(coords);
         }
-        onNotify(`📍 ${res.location} (${res.confidenceScore}%)`);
+        onNotify(`📍 ${res.location} (${res.latitude.toFixed(4)}, ${res.longitude.toFixed(4)})`);
       }
     } catch (err: any) {
       const isDenied = err?.code === 1 || err?.message?.toLowerCase?.().includes('denied');
@@ -232,6 +276,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
       onUpdateProfile?.({
         ...profile,
         location: newLoc,
+        latitude: undefined,
+        longitude: undefined,
         locationAccuracy: 'District-level',
         locationConfidence: 88,
       });
@@ -259,9 +305,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const completedCount = [0, 1, 2].filter((i) => doneStages[selectedPathway.id + i]).length;
   const filteredJobs = jobs.filter((j) => jobFilter === 'All' || j.type === jobFilter);
   const nearbyCount = jobs.filter((j) => j.inRange).length;
-  const schemes = locationData?.schemes?.length ? locationData.schemes : FALLBACK_SCHEMES;
-  const schemesAreFallback = !locationData?.schemes?.length;
+  const schemes = locationData?.schemes || [];
   const centers = locationData?.trainingCenters || [];
+  const isFetchingLiveAi = isRefreshingLocationData || isDetectingLocation;
 
   const scrollToSection = (id: string) => {
     document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -697,7 +743,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
               {onRefreshLocationAi && (
                 <button
-                  onClick={onRefreshLocationAi}
+                  onClick={() => onRefreshLocationAi(liveCoords)}
                   disabled={isRefreshingLocationData}
                   className="min-h-12 px-4 rounded-xl bg-white border border-[#245A91]/30 text-[#245A91] hover:bg-[#F7F9FC] text-sm font-bold flex items-center gap-2 disabled:opacity-70 transition-colors"
                 >
@@ -715,6 +761,12 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 <div className="min-w-0">
                   <span className="font-bold text-[#17365D]">{dt('coverage', L)}: </span>
                   <span className="text-[#5F6B76]">{coverageText}</span>
+                  {liveCoords && (
+                    <div className="text-[11px] font-semibold text-[#245A91] tabular-nums mt-0.5">
+                      GPS: {liveCoords.latitude.toFixed(4)}° N, {liveCoords.longitude.toFixed(4)}° E
+                      {typeof liveCoords.accuracyMeters === 'number' ? ` (±${Math.round(liveCoords.accuracyMeters)}m)` : ''}
+                    </div>
+                  )}
                 </div>
               </div>
               <span className="px-2.5 py-1 rounded-lg text-xs font-extrabold bg-[#17365D] text-white flex-none tabular-nums">
@@ -751,13 +803,13 @@ export const Dashboard: React.FC<DashboardProps> = ({
             {/* Interactive District Leaflet Map */}
             <div className="mt-4">
               <DistrictMiniMap
-                latitude={locationData?.latitude}
-                longitude={locationData?.longitude}
-                district={districtShort || 'Maharajganj'}
+                latitude={liveCoords?.latitude ?? locationData?.latitude}
+                longitude={liveCoords?.longitude ?? locationData?.longitude}
+                district={districtShort || (L === 'en' ? 'Detecting GPS...' : 'GPS स्थान खोजा जा रहा है...')}
                 state={locationData?.state}
                 locality={currentAccuracy.locality}
                 accuracyLevel={currentAccuracy.level}
-                accuracyMeters={currentAccuracy.accuracyMeters}
+                accuracyMeters={liveCoords?.accuracyMeters ?? currentAccuracy.accuracyMeters}
                 confidenceScore={currentAccuracy.confidenceScore}
                 trainingCenters={centers}
                 onReDetect={handleDetectLocation}
@@ -768,14 +820,52 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
           {/* Schemes */}
           <Panel id="schemes-section">
-            <SectionHead icon="shieldCheck" tag={districtShort} title={dt('schemesTitle', L)} />
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 sm:gap-4">
-              {applyAdminSchemeImages(schemes.slice(0, 3), mediaAssets).map((s) => (
-                <SchemeCard key={s.id} scheme={s} lang={L} onNavigate={go} />
-              ))}
-            </div>
-            {schemesAreFallback && (
-              <p className="mt-3 text-xs text-[#5F6B76]">{dt('schemeFallbackNote', L)}</p>
+            <SectionHead icon="shieldCheck" tag={districtShort || (L === 'en' ? 'GPS Area' : 'GPS क्षेत्र')} title={dt('schemesTitle', L)} />
+            {isFetchingLiveAi && schemes.length === 0 ? (
+              <div className="py-8 flex items-center justify-center gap-3 text-sm font-bold text-[#17365D] bg-[#F7F9FC] rounded-xl border border-[#DCE3EA]">
+                <Icon name="refresh" size={18} className="animate-spin text-[#287D73]" />
+                <span>
+                  {L === 'en'
+                    ? 'Fetching live GPS-matched government schemes via AI...'
+                    : 'आपके सटीक GPS स्थान के लिए AI से लाइव सरकारी योजनाएं लोड हो रही हैं...'}
+                </span>
+              </div>
+            ) : schemes.length === 0 ? (
+              <div className="py-8 px-4 text-center bg-[#F7F9FC] rounded-xl border border-[#DCE3EA] space-y-3">
+                <p className="text-sm font-semibold text-[#17365D]">
+                  {L === 'en'
+                    ? 'Sync your exact GPS location to load live AI-verified government schemes for your area.'
+                    : 'अपने सटीक क्षेत्र की लाइव सरकारी योजनाएं देखने के लिए GPS सिंक करें और AI डेटा लोड करें।'}
+                </p>
+                <div className="flex items-center justify-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={handleDetectLocation}
+                    disabled={isFetchingLiveAi}
+                    className="min-h-11 px-4 rounded-xl bg-[#287D73] hover:bg-[#17365D] text-white text-xs font-bold inline-flex items-center gap-2 disabled:opacity-60"
+                  >
+                    <Icon name="crosshair" size={15} />
+                    {L === 'en' ? 'Sync GPS & Load Schemes' : 'GPS सिंक करें व योजनाएं लोड करें'}
+                  </button>
+                  {onRefreshLocationAi && (
+                    <button
+                      type="button"
+                      onClick={() => onRefreshLocationAi(liveCoords)}
+                      disabled={isFetchingLiveAi}
+                      className="min-h-11 px-4 rounded-xl bg-white border border-[#DCE3EA] text-[#245A91] text-xs font-bold inline-flex items-center gap-2 disabled:opacity-60"
+                    >
+                      <Icon name="sparkles" size={15} />
+                      {dt('refreshAi', L)}
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 sm:gap-4">
+                {applyAdminSchemeImages(schemes.slice(0, 3), mediaAssets).map((s) => (
+                  <SchemeCard key={s.id} scheme={s} lang={L} onNavigate={go} />
+                ))}
+              </div>
             )}
           </Panel>
 
@@ -975,8 +1065,49 @@ export const Dashboard: React.FC<DashboardProps> = ({
               }
             />
 
-            {filteredJobs.length === 0 ? (
-              <p className="text-sm text-[#5F6B76] py-6 text-center">{dt('noJobs', L)}</p>
+            {isFetchingLiveAi && filteredJobs.length === 0 ? (
+              <div className="py-8 flex items-center justify-center gap-3 text-sm font-bold text-[#17365D] bg-[#F7F9FC] rounded-xl border border-[#DCE3EA]">
+                <Icon name="refresh" size={18} className="animate-spin text-[#245A91]" />
+                <span>
+                  {L === 'en'
+                    ? 'Fetching live GPS-matched jobs & self-employment via AI...'
+                    : 'आपके सटीक GPS स्थान के लिए AI से लाइव रोजगार व स्वरोजगार लोड हो रहे हैं...'}
+                </span>
+              </div>
+            ) : filteredJobs.length === 0 ? (
+              <div className="py-8 px-4 text-center bg-[#F7F9FC] rounded-xl border border-[#DCE3EA] space-y-3">
+                <p className="text-sm font-semibold text-[#17365D]">
+                  {jobs.length > 0
+                    ? dt('noJobs', L)
+                    : L === 'en'
+                    ? 'Sync your exact GPS location to load live AI opportunities for your area.'
+                    : 'अपने सटीक क्षेत्र के लाइव अवसर देखने के लिए GPS सिंक करें और AI डेटा लोड करें।'}
+                </p>
+                {jobs.length === 0 && (
+                  <div className="flex items-center justify-center gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={handleDetectLocation}
+                      disabled={isFetchingLiveAi}
+                      className="min-h-11 px-4 rounded-xl bg-[#287D73] hover:bg-[#17365D] text-white text-xs font-bold inline-flex items-center gap-2 disabled:opacity-60"
+                    >
+                      <Icon name="crosshair" size={15} />
+                      {L === 'en' ? 'Sync GPS & Load Live Jobs' : 'GPS सिंक करें व लाइव अवसर लोड करें'}
+                    </button>
+                    {onRefreshLocationAi && (
+                      <button
+                        type="button"
+                        onClick={() => onRefreshLocationAi(liveCoords)}
+                        disabled={isFetchingLiveAi}
+                        className="min-h-11 px-4 rounded-xl bg-white border border-[#DCE3EA] text-[#245A91] text-xs font-bold inline-flex items-center gap-2 disabled:opacity-60"
+                      >
+                        <Icon name="sparkles" size={15} />
+                        {dt('refreshAi', L)}
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
             ) : (
               <>
                 <div className="hidden md:block overflow-x-auto rounded-xl border border-[#DCE3EA]">
@@ -1151,8 +1282,41 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 </button>
               }
             />
-            {centers.length === 0 ? (
-              <p className="text-sm text-[#5F6B76]">{dt('noCenters', L)}</p>
+            {isFetchingLiveAi && centers.length === 0 ? (
+              <div className="py-8 flex items-center justify-center gap-3 text-sm font-bold text-[#17365D] bg-[#F7F9FC] rounded-xl border border-[#DCE3EA]">
+                <Icon name="refresh" size={18} className="animate-spin text-[#287D73]" />
+                <span>
+                  {L === 'en'
+                    ? 'Fetching live GPS-matched training centers via AI...'
+                    : 'आपके सटीक GPS स्थान के लिए AI से लाइव प्रशिक्षण केंद्र लोड हो रहे हैं...'}
+                </span>
+              </div>
+            ) : centers.length === 0 ? (
+              <div className="py-8 px-4 text-center bg-[#F7F9FC] rounded-xl border border-[#DCE3EA] space-y-3">
+                <p className="text-sm font-semibold text-[#17365D]">{dt('noCenters', L)}</p>
+                <div className="flex items-center justify-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={handleDetectLocation}
+                    disabled={isFetchingLiveAi}
+                    className="min-h-11 px-4 rounded-xl bg-[#287D73] hover:bg-[#17365D] text-white text-xs font-bold inline-flex items-center gap-2 disabled:opacity-60"
+                  >
+                    <Icon name="crosshair" size={15} />
+                    {L === 'en' ? 'Sync GPS & Load Centers' : 'GPS सिंक करें व केंद्र लोड करें'}
+                  </button>
+                  {onRefreshLocationAi && (
+                    <button
+                      type="button"
+                      onClick={() => onRefreshLocationAi(liveCoords)}
+                      disabled={isFetchingLiveAi}
+                      className="min-h-11 px-4 rounded-xl bg-white border border-[#DCE3EA] text-[#245A91] text-xs font-bold inline-flex items-center gap-2 disabled:opacity-60"
+                    >
+                      <Icon name="sparkles" size={15} />
+                      {dt('refreshAi', L)}
+                    </button>
+                  )}
+                </div>
+              </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3 sm:gap-4">
                 {centers.slice(0, 3).map((c) => {
