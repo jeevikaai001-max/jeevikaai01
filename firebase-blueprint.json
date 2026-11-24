@@ -170,6 +170,42 @@
         "timestampMs": { "type": "number" }
       },
       "required": ["actorEmail", "actorRole", "action", "section", "targetTitle", "createdAt", "timestampMs"]
+    },
+    "NotificationBroadcast": {
+      "title": "NotificationBroadcast",
+      "description": "Background push notification and alert broadcast sent to all citizens or a specific citizen",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "target": { "type": "string", "enum": ["all", "specific"] },
+        "targetUserId": { "type": "string", "maxLength": 128 },
+        "targetPhone": { "type": "string", "maxLength": 30 },
+        "targetName": { "type": "string", "maxLength": 150 },
+        "title": { "type": "string", "maxLength": 200 },
+        "body": { "type": "string", "maxLength": 1000 },
+        "url": { "type": "string", "maxLength": 300 },
+        "sentBy": { "type": "string", "maxLength": 150 },
+        "pushDeliveredCount": { "type": "number" },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "timestampMs": { "type": "number" }
+      },
+      "required": ["id", "target", "title", "body", "createdAt", "timestampMs"]
+    },
+    "PushSubscriptionRecord": {
+      "title": "PushSubscriptionRecord",
+      "description": "Citizen Web Push subscription record for background PWA and browser notifications",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "endpoint": { "type": "string", "maxLength": 1000 },
+        "uid": { "type": "string", "maxLength": 128 },
+        "phone": { "type": "string", "maxLength": 30 },
+        "name": { "type": "string", "maxLength": 150 },
+        "location": { "type": "string", "maxLength": 200 },
+        "isStandalone": { "type": "boolean" },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "endpoint", "updatedAt"]
     }
   },
   "firestore": {
@@ -208,6 +244,14 @@
     "/admin_activity_logs/{logId}": {
       "schema": "AdminActivityLog",
       "description": "Immutable audit trail of admin and sub-admin additions, edits, and deletions"
+    },
+    "/notifications/{notificationId}": {
+      "schema": "NotificationBroadcast",
+      "description": "Broadcast and targeted push notifications delivered to registered citizens and PWAs"
+    },
+    "/push_subscriptions/{subscriptionId}": {
+      "schema": "PushSubscriptionRecord",
+      "description": "Web Push subscriptions registered by citizen browsers and installed PWAs"
     }
   }
 }

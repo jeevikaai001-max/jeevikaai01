@@ -6,6 +6,8 @@ import { fileURLToPath } from 'url';
 import fs from 'fs';
 import os from 'os';
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
+import * as webpushModule from 'web-push';
+const webpush = (webpushModule as any).generateVAPIDKeys ? webpushModule : (webpushModule as any).default;
 
 dotenv.config();
 
@@ -933,6 +935,226 @@ app.delete('/api/showcase/:id', (req: Request, res: Response) => {
   store.showcase = store.showcase.filter((p) => p.id !== id);
   writeServerStore(store);
   return res.json({ ok: true });
+});
+
+// ============================================================================
+// Web Push (VAPID) Background Notification Engine for PWA & Web Browsers
+// ============================================================================
+const VAPID_KEYS_FILE = path.join(os.tmpdir(), 'jeevika_vapid_keys_v1.json');
+const PUSH_SUBS_FILE = path.join(os.tmpdir(), 'jeevika_push_subscriptions_v1.json');
+
+interface StoredPushSub {
+  id: string;
+  endpoint: string;
+  subscription: webpushModule.PushSubscription;
+  uid?: string;
+  phone?: string;
+  name?: string;
+  location?: string;
+  isStandalone?: boolean;
+  updatedAt: string;
+}
+
+function getOrCreateVapidKeys(): { publicKey: string; privateKey: string; subject: string } {
+  const envPublic = (process.env.VAPID_PUBLIC_KEY || '').trim();
+  const envPrivate = (process.env.VAPID_PRIVATE_KEY || '').trim();
+  const subject = (process.env.VAPID_SUBJECT || 'mailto:admin@jeevikaai.org').trim();
+
+  if (envPublic && envPrivate) {
+    return { publicKey: envPublic, privateKey: envPrivate, subject };
+  }
+
+  try {
+    if (fs.existsSync(VAPID_KEYS_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(VAPID_KEYS_FILE, 'utf8'));
+      if (parsed?.publicKey && parsed?.privateKey) {
+        return { publicKey: parsed.publicKey, privateKey: parsed.privateKey, subject };
+      }
+    }
+  } catch {}
+
+  const generated = webpush.generateVAPIDKeys();
+  try {
+    fs.writeFileSync(VAPID_KEYS_FILE, JSON.stringify(generated, null, 2), 'utf8');
+  } catch {}
+  return { publicKey: generated.publicKey, privateKey: generated.privateKey, subject };
+}
+
+const VAPID_CONFIG = getOrCreateVapidKeys();
+try {
+  webpush.setVapidDetails(VAPID_CONFIG.subject, VAPID_CONFIG.publicKey, VAPID_CONFIG.privateKey);
+} catch (err) {
+  console.warn('Web Push VAPID setup notice:', err);
+}
+
+function readPushSubs(): StoredPushSub[] {
+  try {
+    if (fs.existsSync(PUSH_SUBS_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(PUSH_SUBS_FILE, 'utf8'));
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {}
+  return [];
+}
+
+function writePushSubs(subs: StoredPushSub[]) {
+  try {
+    fs.writeFileSync(PUSH_SUBS_FILE, JSON.stringify(subs, null, 2), 'utf8');
+  } catch {}
+}
+
+function normalizePhoneServer(raw?: string): string {
+  return String(raw || '').replace(/\D/g, '').slice(-10);
+}
+
+app.get('/api/push/vapid-public-key', (_req: Request, res: Response) => {
+  return res.json({
+    enabled: Boolean(VAPID_CONFIG.publicKey),
+    publicKey: VAPID_CONFIG.publicKey,
+  });
+});
+
+app.get('/api/push/subscribers', (_req: Request, res: Response) => {
+  const subs = readPushSubs();
+  return res.json({
+    count: subs.length,
+    subscribers: subs.map((s) => ({
+      id: s.id,
+      uid: s.uid,
+      phone: s.phone,
+      name: s.name,
+      location: s.location,
+      isStandalone: Boolean(s.isStandalone),
+      updatedAt: s.updatedAt,
+    })),
+  });
+});
+
+app.post('/api/push/subscribe', (req: Request, res: Response) => {
+  const body = req.body || {};
+  const subscription = body.subscription;
+  if (!subscription || typeof subscription.endpoint !== 'string' || !subscription.keys?.p256dh || !subscription.keys?.auth) {
+    return res.status(400).json({ error: 'Valid Web Push subscription object is required' });
+  }
+
+  const endpoint = subscription.endpoint.trim();
+  const id =
+    typeof body.id === 'string' && body.id.trim()
+      ? body.id.trim().slice(0, 128)
+      : `sub_${Buffer.from(endpoint).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(-32)}`;
+
+  const record: StoredPushSub = {
+    id,
+    endpoint,
+    subscription,
+    uid: clampStr(body.uid, 128) || undefined,
+    phone: normalizePhoneServer(body.phone) || undefined,
+    name: clampStr(body.name, 150) || undefined,
+    location: clampStr(body.location, 200) || undefined,
+    isStandalone: Boolean(body.isStandalone),
+    updatedAt: new Date().toISOString(),
+  };
+
+  const subs = readPushSubs().filter((s) => s.endpoint !== endpoint);
+  subs.unshift(record);
+  writePushSubs(subs.slice(0, 500));
+
+  return res.json({ ok: true, id: record.id, totalSubscribers: subs.length });
+});
+
+app.post('/api/push/send', async (req: Request, res: Response) => {
+  const body = req.body || {};
+  const title = clampStr(body.title, 200);
+  const message = clampStr(body.body, 1000);
+  const target: 'all' | 'specific' = body.target === 'specific' ? 'specific' : 'all';
+  const targetUserId = clampStr(body.targetUserId, 128);
+  const targetPhone = normalizePhoneServer(body.targetPhone);
+  const url = clampStr(body.url, 300) || '/';
+
+  if (!title || !message) {
+    return res.status(400).json({ error: 'title and body are required' });
+  }
+  if (target === 'specific' && !targetUserId && !targetPhone) {
+    return res.status(400).json({ error: 'targetUserId or targetPhone is required for specific recipient' });
+  }
+
+  // Merge server-stored subscriptions with any Firestore subscriptions forwarded by AdminCMSView
+  const byEndpoint = new Map<string, StoredPushSub>();
+  for (const s of readPushSubs()) {
+    if (s?.endpoint && s?.subscription) {
+      byEndpoint.set(s.endpoint, s);
+    }
+  }
+  if (Array.isArray(body.extraSubscriptions)) {
+    for (const raw of body.extraSubscriptions) {
+      const subObj = raw?.subscription || raw;
+      if (subObj && typeof subObj.endpoint === 'string' && subObj.keys?.p256dh && subObj.keys?.auth) {
+        const ep = subObj.endpoint.trim();
+        byEndpoint.set(ep, {
+          id: clampStr(raw?.id, 128) || ep.slice(-24),
+          endpoint: ep,
+          subscription: subObj,
+          uid: clampStr(raw?.uid, 128) || byEndpoint.get(ep)?.uid,
+          phone: normalizePhoneServer(raw?.phone) || byEndpoint.get(ep)?.phone,
+          name: clampStr(raw?.name, 150) || byEndpoint.get(ep)?.name,
+          location: clampStr(raw?.location, 200) || byEndpoint.get(ep)?.location,
+          isStandalone: Boolean(raw?.isStandalone),
+          updatedAt: raw?.updatedAt || new Date().toISOString(),
+        });
+      }
+    }
+  }
+
+  const allSubs = Array.from(byEndpoint.values());
+  const matched =
+    target === 'all'
+      ? allSubs
+      : allSubs.filter((s) => {
+          const uidMatch = Boolean(targetUserId && s.uid && s.uid === targetUserId);
+          const phoneMatch = Boolean(targetPhone && s.phone && normalizePhoneServer(s.phone) === targetPhone);
+          return uidMatch || phoneMatch;
+        });
+
+  const payloadStr = JSON.stringify({
+    title,
+    body: message,
+    url,
+    tag: `jeevika-push-${Date.now()}`,
+  });
+
+  let sent = 0;
+  let failed = 0;
+  const expiredEndpoints: string[] = [];
+
+  await Promise.all(
+    matched.map(async (item) => {
+      try {
+        await webpush.sendNotification(item.subscription, payloadStr, { TTL: 60 * 60 * 12 });
+        sent += 1;
+      } catch (err: any) {
+        failed += 1;
+        const statusCode = err?.statusCode;
+        if (statusCode === 404 || statusCode === 410) {
+          expiredEndpoints.push(item.endpoint);
+        }
+      }
+    })
+  );
+
+  if (expiredEndpoints.length > 0) {
+    const remaining = readPushSubs().filter((s) => !expiredEndpoints.includes(s.endpoint));
+    writePushSubs(remaining);
+  }
+
+  return res.json({
+    ok: true,
+    target,
+    totalRegistered: allSubs.length,
+    totalMatched: matched.length,
+    sent,
+    failed,
+    expiredEndpoints,
+  });
 });
 
 // Setup Vite middleware in dev or static files in production

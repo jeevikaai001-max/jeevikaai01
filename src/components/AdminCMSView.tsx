@@ -10,11 +10,16 @@ import {
   contentService,
   firestoreService,
   subAdminService,
+  notificationService,
+  normalizePhone,
   AdminUserRecord,
   SubAdminRecord,
   AdminActivityRecord,
   AdminActivityAction,
+  PushNotificationRecord,
+  PushSubscriptionDoc,
 } from '../services/firebase';
+import { pushNotificationService } from '../services/pushNotificationService';
 import { mediaStorageService, uploadToCloudinary } from '../services/cloudinaryService';
 import appletConfig from '../../firebase-applet-config.json';
 
@@ -142,9 +147,13 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
 
   const [notifTarget, setNotifTarget] = useState<'all' | 'specific'>('all');
   const [notifTargetUserId, setNotifTargetUserId] = useState<string>('');
+  const [notifRecipientSearch, setNotifRecipientSearch] = useState<string>('');
   const [notifTitle, setNotifTitle] = useState<string>('JeevikaAI Livelihood Update');
   const [notifBody, setNotifBody] = useState<string>('आपके क्षेत्र में नए रोजगार और कौशल प्रशिक्षण अवसर जोड़े गए हैं।');
   const [notifSending, setNotifSending] = useState<boolean>(false);
+  const [sentNotifications, setSentNotifications] = useState<PushNotificationRecord[]>([]);
+  const [pushSubscriptions, setPushSubscriptions] = useState<PushSubscriptionDoc[]>([]);
+  const [lastPushStatus, setLastPushStatus] = useState<string>('');
 
   useEffect(() => {
     setIsLoadingUsers(true);
@@ -241,9 +250,18 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
       isSuperAdmin ? undefined : currentUser.email
     );
 
+    const unsubNotifs = notificationService.subscribeNotifications((items) => {
+      setSentNotifications(items);
+    });
+    const unsubPushSubs = notificationService.subscribePushSubscriptions((subs) => {
+      setPushSubscriptions(subs);
+    });
+
     return () => {
       unsubSubAdmins();
       unsubLogs();
+      unsubNotifs();
+      unsubPushSubs();
     };
   }, [isAdmin, isSuperAdmin, currentUser?.email]);
 
@@ -970,6 +988,78 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
     loadMediaAndShowcase();
   };
 
+  // Merge registered citizens + any push-enabled PWA devices so Target Recipient always works reliably
+  const notifRecipients = useMemo(() => {
+    const pushByUid = new Set<string>();
+    const pushByPhone = new Set<string>();
+    pushSubscriptions.forEach((s) => {
+      if (s.uid) pushByUid.add(s.uid);
+      if (s.phone) pushByPhone.add(normalizePhone(s.phone));
+    });
+
+    const list: Array<{
+      key: string;
+      uid: string;
+      name: string;
+      phone: string;
+      location: string;
+      status: string;
+      hasPushDevice: boolean;
+    }> = [];
+    const seenUids = new Set<string>();
+
+    users.forEach((u) => {
+      const uid = u.uid || u.id;
+      const phone = normalizePhone(u.phone || '');
+      seenUids.add(uid);
+      list.push({
+        key: uid,
+        uid,
+        name: u.name || (phone ? `नागरिक (${phone.slice(-4)})` : 'पंजीकृत नागरिक'),
+        phone,
+        location: u.location || 'India',
+        status: u.status || 'active',
+        hasPushDevice: pushByUid.has(uid) || (Boolean(phone) && pushByPhone.has(phone)),
+      });
+    });
+
+    // Include any PWA/web push subscribers who haven't completed a profile doc yet
+    pushSubscriptions.forEach((s) => {
+      const uid = s.uid || s.id;
+      if (seenUids.has(uid)) return;
+      seenUids.add(uid);
+      const phone = normalizePhone(s.phone || '');
+      list.push({
+        key: uid,
+        uid,
+        name: s.name || (phone ? `PWA नागरिक (${phone.slice(-4)})` : `PWA Device (${s.id.slice(-6)})`),
+        phone,
+        location: s.location || (s.isStandalone ? 'Installed PWA App' : 'Web Browser'),
+        status: 'push-ready',
+        hasPushDevice: true,
+      });
+    });
+
+    return list;
+  }, [users, pushSubscriptions]);
+
+  const filteredNotifRecipients = useMemo(() => {
+    const q = notifRecipientSearch.trim().toLowerCase();
+    if (!q) return notifRecipients;
+    return notifRecipients.filter(
+      (r) =>
+        r.name.toLowerCase().includes(q) ||
+        r.phone.includes(q.replace(/\D/g, '') || q) ||
+        r.location.toLowerCase().includes(q) ||
+        r.uid.toLowerCase().includes(q)
+    );
+  }, [notifRecipients, notifRecipientSearch]);
+
+  const selectedRecipient = useMemo(
+    () => notifRecipients.find((r) => r.uid === notifTargetUserId) || null,
+    [notifRecipients, notifTargetUserId]
+  );
+
   const handleSendPushNotification = async () => {
     if (!notifTitle.trim() || !notifBody.trim()) {
       onNotify('कृपया शीर्षक और संदेश दोनों दर्ज करें।');
@@ -980,44 +1070,88 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
       return;
     }
     setNotifSending(true);
+    setLastPushStatus('');
     try {
-      if ('Notification' in window && Notification.permission !== 'granted') {
-        await Notification.requestPermission();
-      }
-      const newNotif = {
-        id: 'notif_' + Date.now(),
-        target: notifTarget,
-        targetUserId: notifTargetUserId,
-        title: notifTitle,
-        body: notifBody,
-        createdAt: new Date().toISOString(),
-      };
-      const existingQueue = JSON.parse(localStorage.getItem('jeevika_push_queue') || '[]');
-      localStorage.setItem('jeevika_push_queue', JSON.stringify([newNotif, ...existingQueue]));
+      const targetUser = notifTarget === 'specific' ? selectedRecipient : null;
+      const targetPhone = targetUser?.phone || undefined;
+      const targetName = targetUser?.name || undefined;
 
-      if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
-        const reg = await navigator.serviceWorker.ready;
-        reg.showNotification(notifTitle, {
-          body: notifBody,
-          icon: '/icons/icon-192.svg',
-          badge: '/icons/icon-192.svg',
+      // 1. Trigger real background Web Push (VAPID) to installed PWAs & closed browsers
+      let webPushDelivered = 0;
+      let webPushMatched = 0;
+      try {
+        const pushRes = await fetch('/api/push/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: notifTitle.trim(),
+            body: notifBody.trim(),
+            target: notifTarget,
+            targetUserId: notifTarget === 'specific' ? notifTargetUserId : undefined,
+            targetPhone,
+            url: '/?view=dashboard',
+            extraSubscriptions: pushSubscriptions,
+          }),
         });
+        if (pushRes.ok) {
+          const pushJson = await pushRes.json();
+          webPushDelivered = Number(pushJson?.sent || 0);
+          webPushMatched = Number(pushJson?.totalMatched || 0);
+
+          // Prune expired push subscriptions from Firestore
+          if (Array.isArray(pushJson?.expiredEndpoints) && pushJson.expiredEndpoints.length > 0) {
+            const expiredSet = new Set<string>(pushJson.expiredEndpoints);
+            pushSubscriptions
+              .filter((s) => expiredSet.has(s.endpoint))
+              .forEach((s) => notificationService.removePushSubscription(s.id));
+          }
+        }
+      } catch (pushErr) {
+        console.warn('Backend Web Push delivery notice:', pushErr);
       }
+
+      // 2. Publish to Firestore /notifications so all open/background citizen PWAs & browsers receive it instantly
+      const { syncedToCloud } = await notificationService.publishNotification({
+        target: notifTarget,
+        targetUserId: notifTarget === 'specific' ? notifTargetUserId : undefined,
+        targetPhone,
+        targetName,
+        title: notifTitle.trim(),
+        body: notifBody.trim(),
+        url: '/',
+        sentBy: currentUser?.email || 'Admin',
+        pushDeliveredCount: webPushDelivered,
+      });
+
+      // 3. Also show a local preview confirmation notification on admin device if permission granted
+      if (pushNotificationService.getPermission() === 'granted') {
+        pushNotificationService
+          .displayOsNotification({
+            title: notifTitle.trim(),
+            body: notifBody.trim(),
+            url: '/',
+            tag: `admin-preview-${Date.now()}`,
+          })
+          .catch(() => {});
+      }
+
       logActivity(
         'ADD',
         'notifications',
         notifTitle.trim(),
         notifTarget === 'all'
-          ? `Broadcast sent to all ${users.length} citizens`
-          : `Notification sent to citizen ${notifTargetUserId}`
+          ? `Broadcast sent to all ${notifRecipients.length} citizens (${webPushDelivered}/${webPushMatched} Web Push devices)`
+          : `Notification sent to ${targetName || notifTargetUserId} (${webPushDelivered} Web Push)`
       );
-      onNotify(
+
+      const summaryMsg =
         notifTarget === 'all'
-          ? `सभी ${users.length} नागरिकों को पुश नोटिफिकेशन भेज दिया गया!`
-          : 'चयनित नागरिक को पुश नोटिफिकेशन भेज दिया गया!'
-      );
+          ? `सभी ${notifRecipients.length} नागरिकों को अलर्ट भेजा गया! (बैकग्राउंड PWA पुश: ${webPushDelivered} डिवाइस${syncedToCloud ? ' · लाइव क्लाउड सिंक' : ''})`
+          : `${targetName || 'चयनित नागरिक'} को नोटिफिकेशन भेजा गया! (बैकग्राउंड पुश: ${webPushDelivered} डिवाइस${syncedToCloud ? ' · लाइव क्लाउड सिंक' : ''})`;
+      setLastPushStatus(summaryMsg);
+      onNotify(summaryMsg);
     } catch {
-      onNotify('पुश नोटिफिकेशन कतार में सहेजा गया!');
+      onNotify('पुश नोटिफिकेशन भेजने में त्रुटि हुई, कृपया पुनः प्रयास करें।');
     } finally {
       setNotifSending(false);
     }
@@ -2654,114 +2788,231 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
 
           {/* TAB: PUSH NOTIFICATIONS */}
           {activeTab === 'notifications' && (
-            <div className="bg-white border border-[#DCE3EA] rounded-2xl overflow-hidden space-y-6 p-6 sm:p-8 max-w-3xl text-left">
-              <div>
-                <h3 className="text-lg font-extrabold text-[#17365D] flex items-center gap-2">
-                  <Icon name="bell" size={20} className="text-[#245A91]" />
-                  <span>Background Push Notification &amp; Alert Center</span>
-                </h3>
-                <p className="text-xs sm:text-sm text-[#5F6B76] mt-1">
-                  Send background push notifications and WhatsApp reminders to registered citizens.
-                </p>
-              </div>
-
-              <div className="space-y-4 pt-2">
-                <div>
-                  <label className="block text-xs font-bold text-[#17365D] uppercase mb-1.5">
-                    Target Recipient (प्राप्तकर्ता)
-                  </label>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <button
-                      type="button"
-                      onClick={() => setNotifTarget('all')}
-                      className={`min-h-[48px] p-3 rounded-xl border text-left font-bold text-xs sm:text-sm flex items-center justify-between transition-colors ${
-                        notifTarget === 'all'
-                          ? 'border-[#245A91] bg-[#245A91]/10 text-[#17365D]'
-                          : 'border-[#DCE3EA] bg-white text-[#5F6B76] hover:border-[#245A91]'
-                      }`}
-                    >
-                      <span className="flex items-center gap-2">
-                        <Icon name="users" size={16} className="text-[#245A91]" />
-                        <span>All Citizens (सभी नागरिक)</span>
-                      </span>
-                      <span className="px-2 py-0.5 rounded bg-[#245A91] text-white text-[10px] tabular-nums">
-                        {users.length} citizens
-                      </span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setNotifTarget('specific')}
-                      className={`min-h-[48px] p-3 rounded-xl border text-left font-bold text-xs sm:text-sm flex items-center justify-between transition-colors ${
-                        notifTarget === 'specific'
-                          ? 'border-[#245A91] bg-[#245A91]/10 text-[#17365D]'
-                          : 'border-[#DCE3EA] bg-white text-[#5F6B76] hover:border-[#245A91]'
-                      }`}
-                    >
-                      <span className="flex items-center gap-2">
-                        <Icon name="user" size={16} className="text-[#245A91]" />
-                        <span>Specific Citizen (विशिष्ट नागरिक)</span>
-                      </span>
-                    </button>
+            <div className="space-y-6 max-w-3xl text-left">
+              <div className="bg-white border border-[#DCE3EA] rounded-2xl overflow-hidden space-y-6 p-6 sm:p-8">
+                <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+                  <div>
+                    <h3 className="text-lg font-extrabold text-[#17365D] flex items-center gap-2">
+                      <Icon name="bell" size={20} className="text-[#245A91]" />
+                      <span>Background Push Notification &amp; Alert Center</span>
+                    </h3>
+                    <p className="text-xs sm:text-sm text-[#5F6B76] mt-1">
+                      Send real-time &amp; background PWA push notifications and WhatsApp reminders to registered citizens.
+                    </p>
+                  </div>
+                  <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#E9F7F4] border border-[#287D73]/25 text-[#1E6058] text-xs font-extrabold flex-none">
+                    <span className="w-2 h-2 rounded-full bg-[#287D73]" />
+                    <span className="tabular-nums">{pushSubscriptions.length} Push-Ready Devices</span>
                   </div>
                 </div>
 
-                {notifTarget === 'specific' && (
+                <div className="space-y-4 pt-1">
+                  <div>
+                    <label className="block text-xs font-bold text-[#17365D] uppercase mb-1.5">
+                      Target Recipient (प्राप्तकर्ता)
+                    </label>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <button
+                        type="button"
+                        onClick={() => setNotifTarget('all')}
+                        className={`min-h-[48px] p-3 rounded-xl border text-left font-bold text-xs sm:text-sm flex items-center justify-between transition-colors ${
+                          notifTarget === 'all'
+                            ? 'border-[#245A91] bg-[#245A91]/10 text-[#17365D]'
+                            : 'border-[#DCE3EA] bg-white text-[#5F6B76] hover:border-[#245A91]'
+                        }`}
+                      >
+                        <span className="flex items-center gap-2">
+                          <Icon name="users" size={16} className="text-[#245A91]" />
+                          <span>All Citizens (सभी नागरिक)</span>
+                        </span>
+                        <span className="px-2 py-0.5 rounded bg-[#245A91] text-white text-[10px] tabular-nums">
+                          {notifRecipients.length} citizens
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setNotifTarget('specific');
+                          if (!notifTargetUserId && notifRecipients.length > 0) {
+                            setNotifTargetUserId(notifRecipients[0].uid);
+                          }
+                        }}
+                        className={`min-h-[48px] p-3 rounded-xl border text-left font-bold text-xs sm:text-sm flex items-center justify-between transition-colors ${
+                          notifTarget === 'specific'
+                            ? 'border-[#245A91] bg-[#245A91]/10 text-[#17365D]'
+                            : 'border-[#DCE3EA] bg-white text-[#5F6B76] hover:border-[#245A91]'
+                        }`}
+                      >
+                        <span className="flex items-center gap-2">
+                          <Icon name="user" size={16} className="text-[#245A91]" />
+                          <span>Specific Citizen (विशिष्ट नागरिक)</span>
+                        </span>
+                        <span className="px-2 py-0.5 rounded bg-[#287D73]/15 text-[#1E6058] text-[10px] font-bold">
+                          1-to-1
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {notifTarget === 'specific' && (
+                    <div className="space-y-2.5 p-4 rounded-xl bg-[#F7F9FC] border border-[#DCE3EA]">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <label className="block text-xs font-bold text-[#17365D] uppercase">
+                          Select Target Citizen ({filteredNotifRecipients.length})
+                        </label>
+                        <input
+                          type="text"
+                          value={notifRecipientSearch}
+                          onChange={(e) => setNotifRecipientSearch(e.target.value)}
+                          placeholder="नाम / मोबाइल / जिला खोजें..."
+                          className="sm:w-60 px-3 py-1.5 rounded-lg border border-[#DCE3EA] bg-white text-xs text-[#17365D] font-medium"
+                        />
+                      </div>
+
+                      <select
+                        value={notifTargetUserId}
+                        onChange={(e) => setNotifTargetUserId(e.target.value)}
+                        className="w-full min-h-[44px] p-3 rounded-xl border border-[#DCE3EA] text-xs sm:text-sm font-semibold bg-white text-[#17365D]"
+                      >
+                        <option value="">-- Choose Citizen (नागरिक चुनें) --</option>
+                        {filteredNotifRecipients.map((r) => (
+                          <option key={r.key} value={r.uid}>
+                            {r.name} ({r.phone ? `+91 ${r.phone}` : 'No phone'} · {r.location}
+                            {r.hasPushDevice ? ' · 🔔 Push Active' : ''})
+                          </option>
+                        ))}
+                      </select>
+
+                      {selectedRecipient && (
+                        <div className="flex flex-wrap items-center justify-between gap-2 pt-1 text-xs">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-bold text-[#17365D]">{selectedRecipient.name}</span>
+                            {selectedRecipient.phone && (
+                              <span className="text-[#5F6B76] tabular-nums">+91 {selectedRecipient.phone}</span>
+                            )}
+                            <span
+                              className={`px-2 py-0.5 rounded-md text-[10px] font-extrabold ${
+                                selectedRecipient.hasPushDevice
+                                  ? 'bg-[#E9F7F4] text-[#1E6058] border border-[#287D73]/25'
+                                  : 'bg-[#FFF8EB] text-[#9A5B04] border border-[#D9822B]/30'
+                              }`}
+                            >
+                              {selectedRecipient.hasPushDevice
+                                ? 'Background PWA Push Ready'
+                                : 'Live In-App Alert Ready (Push Not Yet Enabled on Device)'}
+                            </span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   <div>
                     <label className="block text-xs font-bold text-[#17365D] uppercase mb-1">
-                      Select Target Citizen
+                      Notification Title (शीर्षक)
                     </label>
-                    <select
-                      value={notifTargetUserId}
-                      onChange={(e) => setNotifTargetUserId(e.target.value)}
+                    <input
+                      type="text"
+                      value={notifTitle}
+                      onChange={(e) => setNotifTitle(e.target.value)}
+                      placeholder="e.g. नया रोजगार अवसर उपलब्ध है!"
                       className="w-full min-h-[44px] p-3 rounded-xl border border-[#DCE3EA] text-xs sm:text-sm font-semibold bg-white text-[#17365D]"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-[#17365D] uppercase mb-1">
+                      Notification Message Body (संदेश)
+                    </label>
+                    <textarea
+                      rows={3}
+                      value={notifBody}
+                      onChange={(e) => setNotifBody(e.target.value)}
+                      placeholder="Enter notification message..."
+                      className="w-full p-3 rounded-xl border border-[#DCE3EA] text-xs sm:text-sm font-medium bg-white text-[#17365D]"
+                    />
+                  </div>
+
+                  {lastPushStatus && (
+                    <div className="p-3 rounded-xl bg-[#E9F7F4] border border-[#287D73]/30 text-xs font-bold text-[#1E6058]">
+                      ✓ {lastPushStatus}
+                    </div>
+                  )}
+
+                  <div className="pt-2 flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={handleSendPushNotification}
+                      disabled={notifSending}
+                      className="w-full sm:w-auto min-h-[48px] px-6 py-3 rounded-xl bg-[#245A91] hover:bg-[#17365D] text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
                     >
-                      <option value="">-- Choose Citizen --</option>
-                      {users.map((u) => (
-                        <option key={u.uid} value={u.uid}>
-                          {u.name} ({u.phone ? `+91 ${u.phone}` : 'No phone'} - {u.location || 'India'} - {u.status})
-                        </option>
-                      ))}
-                    </select>
+                      <Icon name="bell" size={16} />
+                      <span>{notifSending ? 'Broadcasting...' : 'Push Notification Broadcast'}</span>
+                    </button>
+
+                    {notifTarget === 'specific' && selectedRecipient?.phone && (
+                      <a
+                        href={`https://wa.me/91${selectedRecipient.phone}?text=${encodeURIComponent(
+                          `*${notifTitle.trim()}*\n\n${notifBody.trim()}\n\n— JeevikaAI`
+                        )}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="w-full sm:w-auto min-h-[48px] px-5 py-3 rounded-xl bg-[#287D73] hover:bg-[#1E6058] text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-2 transition-colors"
+                      >
+                        <Icon name="message" size={16} />
+                        <span>Send WhatsApp Reminder</span>
+                      </a>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Recent Broadcast History */}
+              <div className="bg-white border border-[#DCE3EA] rounded-2xl p-5 sm:p-6 space-y-4">
+                <div className="flex items-center justify-between gap-2 pb-3 border-b border-[#DCE3EA]">
+                  <h4 className="text-sm font-extrabold text-[#17365D] flex items-center gap-2">
+                    <Icon name="history" size={16} className="text-[#245A91]" />
+                    <span>Recent Sent Notifications ({sentNotifications.length})</span>
+                  </h4>
+                </div>
+                {sentNotifications.length === 0 ? (
+                  <p className="text-xs text-[#5F6B76] py-3">
+                    अभी तक कोई नोटिफिकेशन नहीं भेजा गया है। ऊपर से पहला ब्रॉडकास्ट भेजें।
+                  </p>
+                ) : (
+                  <div className="space-y-2.5 max-h-80 overflow-y-auto pr-1">
+                    {sentNotifications.slice(0, 15).map((item) => (
+                      <div
+                        key={item.id}
+                        className="p-3.5 rounded-xl bg-[#F7F9FC] border border-[#DCE3EA] space-y-1"
+                      >
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <span className="text-xs font-extrabold text-[#17365D]">{item.title}</span>
+                          <span className="text-[10px] font-bold text-[#5F6B76] tabular-nums">
+                            {new Date(item.createdAt).toLocaleString('en-IN', {
+                              day: '2-digit',
+                              month: 'short',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}
+                          </span>
+                        </div>
+                        <p className="text-xs text-[#475569] leading-relaxed">{item.body}</p>
+                        <div className="flex items-center gap-2 flex-wrap pt-1 text-[10px] font-bold">
+                          <span className="px-2 py-0.5 rounded bg-white border border-[#DCE3EA] text-[#245A91]">
+                            {item.target === 'all'
+                              ? 'Target: All Citizens'
+                              : `Target: ${item.targetName || item.targetPhone || item.targetUserId}`}
+                          </span>
+                          <span className="px-2 py-0.5 rounded bg-[#E9F7F4] text-[#1E6058]">
+                            Web Push: {item.pushDeliveredCount ?? 0} device(s)
+                          </span>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 )}
-
-                <div>
-                  <label className="block text-xs font-bold text-[#17365D] uppercase mb-1">
-                    Notification Title (शीर्षक)
-                  </label>
-                  <input
-                    type="text"
-                    value={notifTitle}
-                    onChange={(e) => setNotifTitle(e.target.value)}
-                    placeholder="e.g. नया रोजगार अवसर उपलब्ध है!"
-                    className="w-full min-h-[44px] p-3 rounded-xl border border-[#DCE3EA] text-xs sm:text-sm font-semibold bg-white text-[#17365D]"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-[#17365D] uppercase mb-1">
-                    Notification Message Body (संदेश)
-                  </label>
-                  <textarea
-                    rows={3}
-                    value={notifBody}
-                    onChange={(e) => setNotifBody(e.target.value)}
-                    placeholder="Enter notification message..."
-                    className="w-full p-3 rounded-xl border border-[#DCE3EA] text-xs sm:text-sm font-medium bg-white text-[#17365D]"
-                  />
-                </div>
-
-                <div className="pt-2">
-                  <button
-                    onClick={handleSendPushNotification}
-                    disabled={notifSending}
-                    className="w-full sm:w-auto min-h-[48px] px-6 py-3 rounded-xl bg-[#245A91] hover:bg-[#17365D] text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
-                  >
-                    <Icon name="bell" size={16} />
-                    <span>{notifSending ? 'Broadcasting...' : 'Push Notification Broadcast'}</span>
-                  </button>
-                </div>
               </div>
             </div>
           )}

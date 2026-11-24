@@ -20,6 +20,8 @@ interface NavbarProps {
   onOpenAccount?: (mode: 'create' | 'login') => void;
   isDarkMode?: boolean;
   onToggleDarkMode?: () => void;
+  onOpenPermissions?: () => void;
+  pendingPermissionsCount?: number;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -36,6 +38,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenAccount,
   isDarkMode = false,
   onToggleDarkMode,
+  onOpenPermissions,
+  pendingPermissionsCount = 0,
 }) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [langMenuOpen, setLangMenuOpen] = useState(false);
@@ -156,6 +160,22 @@ export const Navbar: React.FC<NavbarProps> = ({
               >
                 <Icon name="download" size={14} />
                 <span>Install</span>
+              </button>
+            )}
+
+            {onOpenPermissions && pendingPermissionsCount > 0 && (
+              <button
+                type="button"
+                onClick={onOpenPermissions}
+                aria-label="Enable app permissions"
+                title="नोटिफिकेशन, माइक व GPS अनुमतियाँ चालू करें (Enable App Permissions)"
+                className="min-h-[38px] px-2.5 py-1.5 rounded-xl border border-[#287D73]/35 bg-[#E9F7F4] text-[#1E6058] hover:bg-[#287D73] hover:text-white transition-colors flex items-center gap-1.5 flex-shrink-0 text-xs font-extrabold"
+              >
+                <Icon name="bell" size={14} />
+                <span className="hidden md:inline">Permissions</span>
+                <span className="w-4 h-4 rounded-full bg-[#287D73] text-white text-[10px] font-extrabold flex items-center justify-center tabular-nums">
+                  {pendingPermissionsCount}
+                </span>
               </button>
             )}
 

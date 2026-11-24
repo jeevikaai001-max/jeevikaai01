@@ -44,6 +44,14 @@ import { AppWelcome } from './components/AppWelcome';
 import { BottomNav } from './components/BottomNav';
 import { Logo } from './components/Logo';
 import { Icon } from './components/Icons';
+import { pushNotificationService } from './services/pushNotificationService';
+import {
+  useAppPermissions,
+  PermissionsPromptModal,
+  WebsitePermissionsBar,
+  PWA_CANCEL_SESSION_KEY,
+  WEB_BANNER_DISMISSED_KEY,
+} from './components/PermissionsPrompt';
 
 export function App() {
   const isStandalone = typeof window !== 'undefined' && (
@@ -107,6 +115,21 @@ export function App() {
   const hasAutoDetectedGpsRef = useRef<boolean>(false);
   const locationFetchSeqRef = useRef<number>(0);
   const lastSyncedLangRef = useRef<SupportedLanguage>(currentLang);
+  const [showPermissionsModal, setShowPermissionsModal] = useState<boolean>(false);
+  const [pwaPermissionsCancelled, setPwaPermissionsCancelled] = useState<boolean>(() => {
+    try {
+      return sessionStorage.getItem(PWA_CANCEL_SESSION_KEY) === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const [webBannerDismissed, setWebBannerDismissed] = useState<boolean>(() => {
+    try {
+      return sessionStorage.getItem(WEB_BANNER_DISMISSED_KEY) === 'true';
+    } catch {
+      return false;
+    }
+  });
 
   useEffect(() => {
     try {
@@ -297,6 +320,60 @@ export function App() {
     });
     return () => unsubscribe();
   }, []);
+
+  const appPermissions = useAppPermissions({
+    uid: currentUser?.uid,
+    phone: profile?.phone || currentUser?.phone,
+    name: profile?.name || currentUser?.displayName || undefined,
+    location: activeLocation || profile?.location,
+    onLocationDetected: (detected) => {
+      if (detected && typeof detected.latitude === 'number' && typeof detected.longitude === 'number') {
+        handleLocationChange(detected.location, detected);
+      }
+    },
+  });
+
+  // In installed PWA standalone mode, prompt for needed permissions immediately on open
+  // until all permissions are granted or the user explicitly clicks Cancel for this session.
+  useEffect(() => {
+    if (showSplash) return;
+    if (isStandalone && !appPermissions.allGranted && !pwaPermissionsCancelled) {
+      setShowPermissionsModal(true);
+    }
+  }, [isStandalone, showSplash, appPermissions.allGranted, pwaPermissionsCancelled]);
+
+  // Keep Web Push subscription synced whenever Notification permission is granted or user identity updates
+  useEffect(() => {
+    if (appPermissions.permissions.notifications !== 'granted') return;
+    pushNotificationService
+      .requestAndSubscribePush({
+        uid: currentUser?.uid,
+        phone: profile?.phone || currentUser?.phone,
+        name: profile?.name || currentUser?.displayName || undefined,
+        location: activeLocation || profile?.location,
+        askIfDefault: false,
+      })
+      .catch(() => {});
+  }, [
+    appPermissions.permissions.notifications,
+    currentUser?.uid,
+    currentUser?.phone,
+    profile?.phone,
+    profile?.name,
+    activeLocation,
+  ]);
+
+  // Real-time citizen notification listener (handles All Citizens + Specific Citizen targeting)
+  useEffect(() => {
+    const unsub = pushNotificationService.startCitizenNotificationListener({
+      uid: currentUser?.uid,
+      phone: profile?.phone || currentUser?.phone,
+      onIncomingAlert: (notif) => {
+        notify(`🔔 ${notif.title}: ${notif.body}`);
+      },
+    });
+    return () => unsub();
+  }, [currentUser?.uid, currentUser?.phone, profile?.phone]);
 
   const navigateTo = (v: AppView | string, sectionId?: string) => {
     const targetView = (v as AppView) || 'home';
@@ -985,11 +1062,28 @@ export function App() {
           onOpenAccount={setAccountMode}
           isDarkMode={isDarkMode}
           onToggleDarkMode={() => setIsDarkMode((prev) => !prev)}
+          onOpenPermissions={() => setShowPermissionsModal(true)}
+          pendingPermissionsCount={appPermissions.pendingCount}
         />
       )}
 
       {/* Primary Route Views */}
       <div className={`flex-1 ${isStandalone && !profile ? 'pt-0' : 'pt-16 sm:pt-20'} pb-20 sm:pb-24`}>
+        {/* Website On-Demand Permissions Bar (Notifications, Microphone, GPS) */}
+        {!showSplash && !isStandalone && !webBannerDismissed && !appPermissions.allGranted && (
+          <WebsitePermissionsBar
+            visible={true}
+            currentLang={currentLang}
+            pendingCount={appPermissions.pendingCount}
+            onOpenModal={() => setShowPermissionsModal(true)}
+            onDismiss={() => {
+              setWebBannerDismissed(true);
+              try {
+                sessionStorage.setItem(WEB_BANNER_DISMISSED_KEY, 'true');
+              } catch {}
+            }}
+          />
+        )}
         {currentView === 'home' && (
           isStandalone && !profile ? (
             <AppWelcome
@@ -1124,6 +1218,9 @@ export function App() {
           <NotificationSettingsView
             onNotify={notify}
             go={navigateTo}
+            currentUser={currentUser}
+            profile={profile}
+            onOpenPermissions={() => setShowPermissionsModal(true)}
           />
         )}
 
@@ -1290,6 +1387,28 @@ export function App() {
           navigateTo('admin');
         }}
         onNotify={notify}
+      />
+
+      {/* PWA Auto-Launch & Website On-Demand Permissions Modal (Notifications, Microphone, GPS) */}
+      <PermissionsPromptModal
+        isOpen={showPermissionsModal}
+        isStandalone={isStandalone}
+        currentLang={currentLang}
+        permissions={appPermissions.permissions}
+        isRequestingKey={appPermissions.isRequestingKey}
+        onRequestNotification={appPermissions.requestNotification}
+        onRequestMicrophone={appPermissions.requestMicrophone}
+        onRequestGeolocation={appPermissions.requestGeolocation}
+        onRequestAll={appPermissions.requestAllPending}
+        onCancel={() => {
+          setShowPermissionsModal(false);
+          if (isStandalone) {
+            setPwaPermissionsCancelled(true);
+            try {
+              sessionStorage.setItem(PWA_CANCEL_SESSION_KEY, 'true');
+            } catch {}
+          }
+        }}
       />
 
       {/* AI Profile Analysis & Livelihood Synthesis Overlay */}

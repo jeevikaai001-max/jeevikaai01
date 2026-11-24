@@ -69,6 +69,8 @@ import {
   Lock,
   Bookmark,
   Moon,
+  MessageCircle,
+  History,
 } from 'lucide-react';
 
 interface IconProps {
@@ -155,6 +157,8 @@ export const Icon: React.FC<IconProps> = ({ name, size = 20, className = '', sty
     case 'bell': return <Bell size={size} className={className} style={style} />;
     case 'camera': return <Camera size={size} className={className} style={style} />;
     case 'lock': return <Lock size={size} className={className} style={style} />;
+    case 'message': return <MessageCircle size={size} className={className} style={style} />;
+    case 'history': return <History size={size} className={className} style={style} />;
     default: return null;
   }
 };

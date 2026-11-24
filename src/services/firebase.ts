@@ -94,6 +94,40 @@ export interface AdminActivityRecord {
   timestampMs: number;
 }
 
+export interface PushNotificationRecord {
+  id: string;
+  target: 'all' | 'specific';
+  targetUserId?: string;
+  targetPhone?: string;
+  targetName?: string;
+  title: string;
+  body: string;
+  url?: string;
+  sentBy?: string;
+  pushDeliveredCount?: number;
+  createdAt: string;
+  timestampMs: number;
+}
+
+export interface PushSubscriptionDoc {
+  id: string;
+  endpoint: string;
+  subscription: {
+    endpoint: string;
+    expirationTime?: number | null;
+    keys: {
+      p256dh: string;
+      auth: string;
+    };
+  };
+  uid?: string;
+  phone?: string;
+  name?: string;
+  location?: string;
+  isStandalone?: boolean;
+  updatedAt: string;
+}
+
 // Primary Super Administrator accounts (full control including Sub-Admin management).
 export const SUPER_ADMIN_EMAILS: string[] = [
   'ayushgupt640@gmail.com',
@@ -1512,4 +1546,181 @@ export const subAdminService = {
     }
   }
 };
+
+// ============================================================================
+// Cross-Device Push Notification Broadcasts & Web Push Subscription Registry
+// ============================================================================
+const LOCAL_NOTIF_QUEUE_KEY = 'jeevika_push_queue';
+
+export const notificationService = {
+  /** Publishes a broadcast or targeted citizen notification to Firestore /notifications/{id} */
+  async publishNotification(input: {
+    target: 'all' | 'specific';
+    targetUserId?: string;
+    targetPhone?: string;
+    targetName?: string;
+    title: string;
+    body: string;
+    url?: string;
+    sentBy?: string;
+    pushDeliveredCount?: number;
+  }): Promise<{ record: PushNotificationRecord; syncedToCloud: boolean }> {
+    const nowMs = Date.now();
+    const id = `notif_${nowMs}_${Math.random().toString(36).slice(2, 7)}`;
+    const record: PushNotificationRecord = {
+      id,
+      target: input.target === 'specific' ? 'specific' : 'all',
+      targetUserId: input.targetUserId ? String(input.targetUserId).trim().slice(0, 128) : undefined,
+      targetPhone: input.targetPhone ? normalizePhone(input.targetPhone) || undefined : undefined,
+      targetName: input.targetName ? String(input.targetName).trim().slice(0, 150) : undefined,
+      title: String(input.title || '').trim().slice(0, 200),
+      body: String(input.body || '').trim().slice(0, 1000),
+      url: String(input.url || '/').trim().slice(0, 300),
+      sentBy: input.sentBy ? String(input.sentBy).trim().slice(0, 150) : 'Admin',
+      pushDeliveredCount: typeof input.pushDeliveredCount === 'number' ? input.pushDeliveredCount : 0,
+      createdAt: new Date(nowMs).toISOString(),
+      timestampMs: nowMs,
+    };
+
+    try {
+      const existing = JSON.parse(localStorage.getItem(LOCAL_NOTIF_QUEUE_KEY) || '[]');
+      const next = [record, ...(Array.isArray(existing) ? existing : [])].slice(0, 50);
+      localStorage.setItem(LOCAL_NOTIF_QUEUE_KEY, JSON.stringify(next));
+    } catch {}
+
+    let syncedToCloud = false;
+    if (isRealFirebaseConfigured) {
+      try {
+        await setDoc(doc(getDb(), 'notifications', id), clean(record));
+        syncedToCloud = true;
+      } catch (err) {
+        handleFirestoreError(err, OperationType.CREATE, `notifications/${id}`);
+      }
+    }
+
+    return { record, syncedToCloud };
+  },
+
+  /** Real-time subscription to all broadcast and targeted notifications */
+  subscribeNotifications(
+    onUpdate: (items: PushNotificationRecord[]) => void,
+    onError?: (error: any) => void
+  ): () => void {
+    if (!isRealFirebaseConfigured) {
+      try {
+        const local = JSON.parse(localStorage.getItem(LOCAL_NOTIF_QUEUE_KEY) || '[]');
+        onUpdate(Array.isArray(local) ? local : []);
+      } catch {
+        onUpdate([]);
+      }
+      return () => {};
+    }
+
+    try {
+      return onSnapshot(
+        collection(getDb(), 'notifications'),
+        (snapshot) => {
+          const items = snapshot.docs
+            .map((d) => {
+              const data = d.data() as Partial<PushNotificationRecord>;
+              const ts =
+                typeof data.timestampMs === 'number'
+                  ? data.timestampMs
+                  : data.createdAt
+                  ? new Date(data.createdAt).getTime()
+                  : 0;
+              return {
+                id: data.id || d.id,
+                target: data.target === 'specific' ? 'specific' : 'all',
+                targetUserId: data.targetUserId,
+                targetPhone: data.targetPhone,
+                targetName: data.targetName,
+                title: data.title || 'JeevikaAI Update',
+                body: data.body || '',
+                url: data.url || '/',
+                sentBy: data.sentBy,
+                pushDeliveredCount: data.pushDeliveredCount ?? 0,
+                createdAt: data.createdAt || new Date(ts || Date.now()).toISOString(),
+                timestampMs: ts,
+              } as PushNotificationRecord;
+            })
+            .sort((a, b) => b.timestampMs - a.timestampMs);
+          onUpdate(items);
+        },
+        (error) => {
+          handleFirestoreError(error, OperationType.LIST, 'notifications');
+          if (onError) onError(error);
+        }
+      );
+    } catch (err) {
+      handleFirestoreError(err, OperationType.LIST, 'notifications');
+      if (onError) onError(err);
+      return () => {};
+    }
+  },
+
+  /** Saves or updates a citizen device Web Push subscription in Firestore /push_subscriptions/{id} */
+  async savePushSubscription(docData: PushSubscriptionDoc): Promise<boolean> {
+    if (!isRealFirebaseConfigured || !docData?.id || !docData?.endpoint) return false;
+    try {
+      await setDoc(doc(getDb(), 'push_subscriptions', docData.id), clean(docData), { merge: true });
+      return true;
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, `push_subscriptions/${docData.id}`);
+      return false;
+    }
+  },
+
+  /** Lists all stored Web Push subscriptions from Firestore */
+  async getPushSubscriptions(): Promise<PushSubscriptionDoc[]> {
+    if (!isRealFirebaseConfigured) return [];
+    try {
+      const snap = await getDocs(collection(getDb(), 'push_subscriptions'));
+      return snap.docs
+        .map((d) => ({ id: d.id, ...(d.data() as Omit<PushSubscriptionDoc, 'id'>) }) as PushSubscriptionDoc)
+        .filter((s) => Boolean(s.endpoint && s.subscription?.keys?.p256dh));
+    } catch (err) {
+      handleFirestoreError(err, OperationType.LIST, 'push_subscriptions');
+      return [];
+    }
+  },
+
+  /** Real-time subscription to registered Web Push devices for AdminCMSView */
+  subscribePushSubscriptions(
+    onUpdate: (items: PushSubscriptionDoc[]) => void,
+    onError?: (error: any) => void
+  ): () => void {
+    if (!isRealFirebaseConfigured) {
+      onUpdate([]);
+      return () => {};
+    }
+    try {
+      return onSnapshot(
+        collection(getDb(), 'push_subscriptions'),
+        (snap) => {
+          const items = snap.docs
+            .map((d) => ({ id: d.id, ...(d.data() as Omit<PushSubscriptionDoc, 'id'>) }) as PushSubscriptionDoc)
+            .filter((s) => Boolean(s.endpoint && s.subscription?.keys?.p256dh));
+          onUpdate(items);
+        },
+        (error) => {
+          handleFirestoreError(error, OperationType.LIST, 'push_subscriptions');
+          if (onError) onError(error);
+        }
+      );
+    } catch (err) {
+      handleFirestoreError(err, OperationType.LIST, 'push_subscriptions');
+      if (onError) onError(err);
+      return () => {};
+    }
+  },
+
+  async removePushSubscription(id: string): Promise<void> {
+    if (!isRealFirebaseConfigured || !id) return;
+    try {
+      await deleteDoc(doc(getDb(), 'push_subscriptions', id));
+    } catch {}
+  },
+};
+
 
