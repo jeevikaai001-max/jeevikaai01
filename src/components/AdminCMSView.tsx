@@ -1,0 +1,2627 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { Icon } from './Icons';
+import { Opportunity, Pathway, AppView, MediaAssetRecord, ShowcaseProduct } from '../types';
+import { JOBS, PATHWAYS } from '../data/mockData';
+import { AppUser, isAdminUser, contentService, firestoreService, AdminUserRecord } from '../services/firebase';
+import { mediaStorageService, uploadToCloudinary } from '../services/cloudinaryService';
+
+interface AdminCMSViewProps {
+  currentUser?: AppUser | null;
+  onNotify: (msg: string) => void;
+  go: (route: AppView | string) => void;
+  onOpenLogin?: () => void;
+  onLogout?: () => void;
+}
+
+export interface DistrictIntelligenceItem {
+  district: string;
+  state: string;
+  users: number;
+  jobs: number;
+  topSkill: string;
+  pmkvyCenter: string;
+  isDynamicUserDistrict?: boolean;
+}
+
+const BASE_DISTRICT_INTELLIGENCE: DistrictIntelligenceItem[] = [
+  { district: 'Maharajganj', state: 'Uttar Pradesh', users: 142, jobs: 18, topSkill: 'Digital Typing & CSC', pmkvyCenter: 'Active (2 Centers)' },
+  { district: 'Gorakhpur', state: 'Uttar Pradesh', users: 284, jobs: 35, topSkill: 'Solar PV & Electrical', pmkvyCenter: 'Active (5 Centers)' },
+  { district: 'Varanasi', state: 'Uttar Pradesh', users: 310, jobs: 42, topSkill: 'Handloom & Garment', pmkvyCenter: 'Active (4 Centers)' },
+  { district: 'Patna', state: 'Bihar', users: 395, jobs: 54, topSkill: 'Computer & Office Assistant', pmkvyCenter: 'Active (6 Centers)' },
+  { district: 'Gaya', state: 'Bihar', users: 165, jobs: 21, topSkill: 'Solar & Agri-Machinery', pmkvyCenter: 'Active (2 Centers)' },
+  { district: 'South Delhi', state: 'Delhi NCR', users: 520, jobs: 88, topSkill: 'Retail, Delivery & IT Support', pmkvyCenter: 'Active (8 Centers)' },
+  { district: 'Pune', state: 'Maharashtra', users: 412, jobs: 76, topSkill: 'Accounts, CAD & Manufacturing', pmkvyCenter: 'Active (7 Centers)' },
+  { district: 'Jaipur', state: 'Rajasthan', users: 290, jobs: 46, topSkill: 'EV Technician & Handicrafts', pmkvyCenter: 'Active (4 Centers)' },
+  { district: 'Bhopal', state: 'Madhya Pradesh', users: 210, jobs: 31, topSkill: 'Food Processing & Dairy', pmkvyCenter: 'Active (3 Centers)' },
+];
+
+export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
+  currentUser,
+  onNotify,
+  go,
+  onOpenLogin,
+  onLogout,
+}) => {
+  const isAdmin = isAdminUser(currentUser);
+
+  const [activeTab, setActiveTab] = useState<'overview' | 'users' | 'jobs' | 'pathways' | 'districts' | 'media' | 'notifications'>('users');
+  const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
+
+  const [selectedStateFilter, setSelectedStateFilter] = useState<string>('All India');
+  const [searchQuery, setSearchQuery] = useState<string>('');
+
+  const [users, setUsers] = useState<AdminUserRecord[]>([]);
+  const [isLoadingUsers, setIsLoadingUsers] = useState<boolean>(true);
+  const [userStatusFilter, setUserStatusFilter] = useState<'all' | 'pending' | 'completed'>('all');
+  const [selectedUserDetail, setSelectedUserDetail] = useState<AdminUserRecord | null>(null);
+  const [confirmActionKey, setConfirmActionKey] = useState<string | null>(null);
+  const [waPreviewLink, setWaPreviewLink] = useState<{ name: string; phone: string; url: string } | null>(null);
+
+  const [mediaAssets, setMediaAssets] = useState<MediaAssetRecord[]>([]);
+  const [showcaseProducts, setShowcaseProducts] = useState<ShowcaseProduct[]>([]);
+  const [mediaFile, setMediaFile] = useState<File | null>(null);
+  const [mediaFiles, setMediaFiles] = useState<File[]>([]);
+  const [mediaPreview, setMediaPreview] = useState<string>('');
+  const [mediaPreviews, setMediaPreviews] = useState<string[]>([]);
+  const [mediaDirectUrl, setMediaDirectUrl] = useState<string>('');
+  const [mediaTitle, setMediaTitle] = useState('');
+  const [mediaFolder, setMediaFolder] = useState<string>('banner');
+  const [mediaUploading, setMediaUploading] = useState<boolean>(false);
+  const [mediaUploadProgress, setMediaUploadProgress] = useState<number>(0);
+  const [uploadBatchStatus, setUploadBatchStatus] = useState<string>('');
+  const [mediaCtaUrl, setMediaCtaUrl] = useState('');
+  const [mediaCtaLabel, setMediaCtaLabel] = useState('');
+  const [editingMediaId, setEditingMediaId] = useState<string | null>(null);
+  const [mediaCategoryFilter, setMediaCategoryFilter] = useState<string>('all');
+
+  const [opportunities, setOpportunities] = useState<Opportunity[]>(() => {
+    try {
+      const saved = localStorage.getItem('jeevika_admin_jobs_v2');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return [...JOBS];
+  });
+
+  const [pathways, setPathways] = useState<Pathway[]>(() => {
+    try {
+      const saved = localStorage.getItem('jeevika_admin_pathways_v2');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return [...PATHWAYS];
+  });
+
+  const [showAddJobModal, setShowAddJobModal] = useState(false);
+  const [showAddPathwayModal, setShowAddPathwayModal] = useState(false);
+
+  const [jobTitle, setJobTitle] = useState('');
+  const [jobOrg, setJobOrg] = useState('');
+  const [jobType, setJobType] = useState<'Job' | 'Training' | 'Self-employment'>('Job');
+  const [jobState, setJobState] = useState('Uttar Pradesh');
+  const [jobLoc, setJobLoc] = useState('');
+  const [jobPay, setJobPay] = useState('');
+  const [jobMinEdu] = useState('10th Pass');
+  const [jobEligibility, setJobEligibility] = useState('');
+  const [jobContact, setJobContact] = useState('');
+
+  const [pathwayName, setPathwayName] = useState('');
+  const [pathwayHi, setPathwayHi] = useState('');
+  const [pathwayRole, setPathwayRole] = useState('');
+  const [pathwayNsqf, setPathwayNsqf] = useState<number>(3);
+  const [pathwayDuration, setPathwayDuration] = useState('3 months (about 240 hours)');
+  const [pathwayDemand] = useState<number>(3);
+
+  const [notifTarget, setNotifTarget] = useState<'all' | 'specific'>('all');
+  const [notifTargetUserId, setNotifTargetUserId] = useState<string>('');
+  const [notifTitle, setNotifTitle] = useState<string>('JeevikaAI Livelihood Update');
+  const [notifBody, setNotifBody] = useState<string>('आपके क्षेत्र में नए रोजगार और कौशल प्रशिक्षण अवसर जोड़े गए हैं।');
+  const [notifSending, setNotifSending] = useState<boolean>(false);
+
+  useEffect(() => {
+    setIsLoadingUsers(true);
+    firestoreService.getAllUsers().then((initialUsers) => {
+      setUsers(initialUsers);
+      setIsLoadingUsers(false);
+    }).catch(() => {
+      setIsLoadingUsers(false);
+    });
+
+    const unsubscribe = firestoreService.subscribeUsers((liveUsers) => {
+      setUsers(liveUsers);
+      setIsLoadingUsers(false);
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, []);
+
+  const loadMediaAndShowcase = async () => {
+    await mediaStorageService.syncLocalMediaToFirestore();
+    const assets = await mediaStorageService.getMediaAssets();
+    setMediaAssets(assets);
+    const prods = await mediaStorageService.getShowcaseProducts();
+    setShowcaseProducts(prods);
+  };
+
+  useEffect(() => {
+    loadMediaAndShowcase();
+    const unsub = mediaStorageService.subscribeMediaAssets((liveAssets) => {
+      setMediaAssets(liveAssets);
+    });
+    return () => {
+      unsub();
+    };
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('jeevika_admin_jobs_v2', JSON.stringify(opportunities));
+    } catch {}
+  }, [opportunities]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('jeevika_admin_pathways_v2', JSON.stringify(pathways));
+    } catch {}
+  }, [pathways]);
+
+  const pendingUsersCount = useMemo(() => users.filter((u) => u.status === 'pending').length, [users]);
+  const completedUsersCount = useMemo(() => users.filter((u) => u.status === 'completed').length, [users]);
+  const activeNowUsersCount = useMemo(() => users.filter((u) => u.activeNow).length, [users]);
+
+  const availableStates = useMemo<string[]>(() => {
+    const stateSet = new Set<string>();
+    ['Uttar Pradesh', 'Bihar', 'Delhi NCR', 'Maharashtra', 'Rajasthan', 'Madhya Pradesh'].forEach((s) => stateSet.add(s));
+    users.forEach((u) => {
+      const st = (u.state || '').trim();
+      if (st && st !== 'All India' && st.toLowerCase() !== 'all') {
+        stateSet.add(st);
+      }
+      if (u.location && u.location.includes(',')) {
+        const parts = u.location.split(',').map((p) => p.trim());
+        if (parts.length >= 2 && parts[1] && parts[1].length > 1) {
+          stateSet.add(parts[1]);
+        }
+      }
+    });
+    opportunities.forEach((opp) => {
+      if (opp.loc && opp.loc.includes(',')) {
+        const parts = opp.loc.split(',').map((p) => p.trim());
+        const lastPart = parts[parts.length - 1];
+        if (lastPart && lastPart.length > 1) {
+          stateSet.add(lastPart);
+        }
+      }
+    });
+    const sorted = Array.from(stateSet).sort((a, b) => a.localeCompare(b));
+    return ['All India', ...sorted];
+  }, [users, opportunities]);
+
+  const dynamicDistrictIntelligence = useMemo<DistrictIntelligenceItem[]>(() => {
+    const map = new Map<string, DistrictIntelligenceItem>();
+    BASE_DISTRICT_INTELLIGENCE.forEach((item) => {
+      map.set(item.district.toLowerCase(), { ...item });
+    });
+
+    const cleanDistrictName = (raw: string): string => {
+      if (!raw) return '';
+      let d = raw.split(',')[0].trim();
+      d = d.replace(/^(district|dist|city|town|तहसील|जिला)\s+/i, '');
+      d = d.replace(/\s+(district|dist|city|town|तहसील|जिला)$/i, '');
+      return d.trim();
+    };
+
+    users.forEach((u) => {
+      const loc = (u.location || '').trim();
+      if (!loc || loc === 'जिला अनिर्धारित') return;
+      const districtName = cleanDistrictName(loc);
+      if (!districtName || districtName.length < 2) return;
+
+      const key = districtName.toLowerCase();
+      const userState = u.state || (loc.includes(',') ? loc.split(',')[1].trim() : 'Uttar Pradesh');
+      const existing = map.get(key);
+      if (existing) {
+        existing.users += 1;
+        if (u.skills && !u.skills.includes('हुनर दर्ज नहीं')) {
+          const primarySkill = u.skills.split(',')[0].trim();
+          if (primarySkill && !existing.topSkill.toLowerCase().includes(primarySkill.toLowerCase())) {
+            existing.topSkill = `${primarySkill}, ${existing.topSkill}`;
+          }
+        }
+      } else {
+        const userSkill = u.skills && !u.skills.includes('हुनर दर्ज नहीं')
+          ? u.skills.split(',')[0].trim()
+          : 'सामान्य आजीविका व कौशल (General Vocational)';
+        map.set(key, {
+          district: districtName,
+          state: userState,
+          users: 1,
+          jobs: 0,
+          topSkill: userSkill,
+          pmkvyCenter: 'सक्रिय (Live District Center / PMKVY Node)',
+          isDynamicUserDistrict: true,
+        });
+      }
+    });
+
+    opportunities.forEach((opp) => {
+      if (!opp.loc) return;
+      const districtName = cleanDistrictName(opp.loc);
+      if (!districtName) return;
+      const key = districtName.toLowerCase();
+      const existing = map.get(key);
+      if (existing) {
+        existing.jobs += 1;
+      } else {
+        const oppState = opp.loc.includes(',') ? opp.loc.split(',')[1].trim() : 'Uttar Pradesh';
+        map.set(key, {
+          district: districtName,
+          state: oppState,
+          users: 0,
+          jobs: 1,
+          topSkill: opp.title,
+          pmkvyCenter: 'सक्रिय रोजगार नोड (Live Job Center)',
+          isDynamicUserDistrict: true,
+        });
+      }
+    });
+
+    return Array.from(map.values()).sort((a, b) => b.users - a.users);
+  }, [users, opportunities]);
+
+  const filteredDistricts = useMemo(() => {
+    return dynamicDistrictIntelligence.filter((d) => {
+      if (selectedStateFilter === 'All India') return true;
+      return (
+        d.state.toLowerCase().includes(selectedStateFilter.toLowerCase()) ||
+        selectedStateFilter.toLowerCase().includes(d.state.toLowerCase())
+      );
+    });
+  }, [dynamicDistrictIntelligence, selectedStateFilter]);
+
+  const filteredUsers = useMemo(() => {
+    return users.filter((u) => {
+      if (userStatusFilter === 'pending' && u.status !== 'pending') return false;
+      if (userStatusFilter === 'completed' && u.status !== 'completed') return false;
+
+      const matchState =
+        selectedStateFilter === 'All India' ||
+        u.state === selectedStateFilter ||
+        u.location?.toLowerCase().includes(selectedStateFilter.toLowerCase());
+      if (!matchState) return false;
+
+      if (!searchQuery.trim()) return true;
+      const q = searchQuery.toLowerCase().trim();
+      const cleanQPhone = q.replace(/\D/g, '');
+      return (
+        u.name?.toLowerCase().includes(q) ||
+        (cleanQPhone && u.phone?.includes(cleanQPhone)) ||
+        u.phone?.toLowerCase().includes(q) ||
+        u.skills?.toLowerCase().includes(q) ||
+        u.location?.toLowerCase().includes(q) ||
+        u.education?.toLowerCase().includes(q) ||
+        u.uid?.toLowerCase().includes(q)
+      );
+    });
+  }, [users, userStatusFilter, selectedStateFilter, searchQuery]);
+
+  const filteredJobs = useMemo(() => {
+    return opportunities.filter((opp) => {
+      const matchState =
+        selectedStateFilter === 'All India' ||
+        opp.loc.toLowerCase().includes(selectedStateFilter.toLowerCase());
+      const matchSearch =
+        !searchQuery.trim() ||
+        opp.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        opp.org.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        opp.loc.toLowerCase().includes(searchQuery.toLowerCase());
+      return matchState && matchSearch;
+    });
+  }, [opportunities, selectedStateFilter, searchQuery]);
+
+  const filteredMediaAssets = useMemo(() => {
+    const list = mediaAssets.filter((m) => {
+      const matchCat =
+        mediaCategoryFilter === 'any' ||
+        mediaCategoryFilter === 'all' ||
+        m.folder === mediaCategoryFilter ||
+        (mediaCategoryFilter === 'banner' && m.folder === 'hero_banner');
+      const matchSearch =
+        !searchQuery.trim() ||
+        m.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        m.folder?.toLowerCase().includes(searchQuery.toLowerCase());
+      return matchCat && matchSearch;
+    });
+
+    if (mediaCategoryFilter === 'banner') {
+      return [...list].sort((a, b) => {
+        const orderA = typeof a.order === 'number' ? a.order : 999;
+        const orderB = typeof b.order === 'number' ? b.order : 999;
+        return orderA - orderB;
+      });
+    }
+    return list;
+  }, [mediaAssets, mediaCategoryFilter, searchQuery]);
+
+  const heroBannerAssets = useMemo(() => {
+    return mediaAssets
+      .filter((m) => m.folder === 'banner' || m.folder === 'hero_banner')
+      .sort((a, b) => {
+        const orderA = typeof a.order === 'number' ? a.order : 999;
+        const orderB = typeof b.order === 'number' ? b.order : 999;
+        return orderA - orderB;
+      });
+  }, [mediaAssets]);
+
+  const handleMoveSlide = async (id: string, direction: 'up' | 'down') => {
+    const banners = [...heroBannerAssets];
+    const currentIndex = banners.findIndex((b) => b.id === id);
+    if (currentIndex === -1) return;
+    const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
+    if (targetIndex < 0 || targetIndex >= banners.length) return;
+
+    const temp = banners[currentIndex];
+    banners[currentIndex] = banners[targetIndex];
+    banners[targetIndex] = temp;
+
+    const reorderedItems = banners.map((item, idx) => ({
+      id: item.id,
+      order: idx + 1,
+    }));
+
+    const orderMap = new Map(reorderedItems.map((r) => [r.id, r.order]));
+    setMediaAssets((prev) =>
+      prev.map((m) => (orderMap.has(m.id) ? { ...m, order: orderMap.get(m.id)! } : m))
+    );
+
+    await mediaStorageService.reorderMedia(reorderedItems);
+    onNotify('हीरो स्लाइडर में बैनर की स्थिति बदल दी गई! (Position updated)');
+  };
+
+  const handleSetSlideOrder = async (id: string, newOrder: number) => {
+    if (isNaN(newOrder) || newOrder < 1) return;
+    setMediaAssets((prev) =>
+      prev.map((m) => (m.id === id ? { ...m, order: newOrder } : m))
+    );
+    await mediaStorageService.updateMediaAsset(id, { order: newOrder });
+    onNotify(`बैनर क्रम #${newOrder} पर सेट किया गया!`);
+    loadMediaAndShowcase();
+  };
+
+  const handleToggleMediaActive = async (id: string, currentActive?: boolean) => {
+    const newActive = currentActive === false;
+    setMediaAssets((prev) =>
+      prev.map((m) => (m.id === id ? { ...m, active: newActive } : m))
+    );
+    await mediaStorageService.updateMediaAsset(id, { active: newActive });
+    onNotify(newActive ? 'बैनर हीरो स्लाइडर में सक्रिय (Active) किया गया!' : 'बैनर हीरो स्लाइडर से छिपाया गया (Hidden)!');
+  };
+
+  const handleSendWhatsAppReminder = (user: AdminUserRecord) => {
+    const rawPhone = user.phone || '';
+    const cleanPhone = rawPhone.replace(/\D/g, '').slice(-10);
+    if (!cleanPhone || cleanPhone.length !== 10) {
+      onNotify('इस नागरिक के पास वैध 10-अंक का मोबाइल नंबर दर्ज नहीं है।');
+      return;
+    }
+
+    const missingText = user.missingFields.length > 0
+      ? user.missingFields.join(', ')
+      : 'हुनर व शिक्षा';
+
+    const origin = typeof window !== 'undefined' ? window.location.origin : 'https://jeevikaai.app';
+    const message = `नमस्ते ${user.name || 'साथी'} जी,\nJeevikaAI पोर्टल पर आपका खाता बना हुआ है। आपकी आजीविका प्रोफ़ाइल अभी अधूरी (${user.completionPercent}% पूर्ण) है।\n\nकृपया अपने मोबाइल से लॉगिन कर ${missingText} की जानकारी दर्ज करें ताकि आपको जिले के नजदीकी सरकारी रोजगार, PMKVY प्रशिक्षण और स्वरोजगार योजनाएं मिल सकें:\n${origin}\n\n- जीविका एआई (JeevikaAI Admin)`;
+    const waUrl = `https://wa.me/91${cleanPhone}?text=${encodeURIComponent(message)}`;
+
+    try {
+      const existingQueue = JSON.parse(localStorage.getItem('jeevika_push_queue') || '[]');
+      existingQueue.unshift({
+        id: 'wa_notif_' + Date.now(),
+        target: 'specific',
+        targetUserId: user.uid,
+        targetPhone: cleanPhone,
+        title: 'प्रोफ़ाइल पूर्णता अनुस्मारक (Profile Reminder)',
+        body: `WhatsApp रिमाइंडर भेजा गया: ${missingText} दर्ज करें।`,
+        createdAt: new Date().toISOString(),
+      });
+      localStorage.setItem('jeevika_push_queue', JSON.stringify(existingQueue));
+    } catch {}
+
+    setWaPreviewLink({
+      name: user.name || 'नागरिक',
+      phone: cleanPhone,
+      url: waUrl,
+    });
+    onNotify(`WhatsApp रिमाइंडर लिंक तैयार! ${cleanPhone} के लिए नीचे लिंक पर क्लिक करें।`);
+  };
+
+  const handleDeleteUser = async (uid: string) => {
+    await firestoreService.deleteUserData(uid);
+    setUsers((prev) => prev.filter((u) => u.uid !== uid));
+    if (selectedUserDetail?.uid === uid) {
+      setSelectedUserDetail(null);
+    }
+    setConfirmActionKey(null);
+    onNotify('नागरिक खाता सफलतापूर्वक हटा दिया गया।');
+  };
+
+  const handleCreateJob = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!jobTitle.trim() || !jobOrg.trim()) return;
+
+    const newJob: Opportunity = {
+      id: 'opp_' + Date.now(),
+      title: jobTitle.trim(),
+      org: jobOrg.trim(),
+      type: jobType,
+      loc: `${jobLoc || 'District Center'}, ${jobState}`,
+      km: 6,
+      pay: jobPay || '₹9,000 - ₹14,000 / month',
+      path: 'digital',
+      verified: true,
+      source: 'Super Administrator Direct Entry',
+      lastVerifiedDate: 'October 2026',
+      eligibility: jobEligibility || `${jobMinEdu} with basic technical training.`,
+      documentsRequired: ['Aadhaar Card', 'Mark sheet', 'Bank Passbook'],
+      contactInfo: jobContact || 'District Livelihood Coordinator Office',
+    };
+
+    setOpportunities((prev) => [newJob, ...prev]);
+    contentService.upsert('opportunities', newJob.id, newJob);
+    if (newJob.type === 'Training') {
+      contentService.upsert('training_centers', newJob.id, newJob);
+    }
+
+    setShowAddJobModal(false);
+    setJobTitle('');
+    setJobOrg('');
+    setJobLoc('');
+    setJobPay('');
+    setJobEligibility('');
+    setJobContact('');
+    onNotify('New Job Opportunity published successfully to Firestore!');
+  };
+
+  const handleCreatePathway = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pathwayName.trim()) return;
+
+    const newPath: Pathway = {
+      id: 'path_' + Date.now(),
+      name: pathwayName.trim(),
+      hi: pathwayHi.trim() || pathwayName.trim(),
+      role: pathwayRole.trim() || 'Certified Technical Specialist',
+      icon: 'layers',
+      duration: pathwayDuration,
+      nsqf: pathwayNsqf,
+      minEdu: 1,
+      workTypes: ['job', 'self'],
+      reach: 'regional',
+      demand: pathwayDemand,
+      demandNote: 'High regional hiring demand verified across state clusters',
+      interestTags: [pathwayName.toLowerCase(), 'certified', 'technical'],
+      skillTags: [pathwayName.toLowerCase(), 'skills', 'operations'],
+      stages: [
+        ['Foundation Principles', 'Learn core tools, measurements and safety protocols.', 'Weeks 1 to 4'],
+        ['Practical Apprenticeship', 'Hands-on equipment assembly and diagnostics.', 'Weeks 5 to 9'],
+        ['Industry Placement', 'NSQF certification assessment and job readiness.', 'Weeks 10 to 12'],
+      ],
+    };
+
+    setPathways((prev) => [newPath, ...prev]);
+    contentService.upsert('pathways', newPath.id, newPath);
+    setShowAddPathwayModal(false);
+    setPathwayName('');
+    setPathwayHi('');
+    setPathwayRole('');
+    onNotify('New NSQF Skill Pathway added to curriculum & Firestore!');
+  };
+
+  const handleDeleteJob = (id: string) => {
+    setOpportunities((prev) => prev.filter((o) => o.id !== id));
+    contentService.remove('opportunities', id);
+    contentService.remove('training_centers', id);
+    setConfirmActionKey(null);
+    onNotify('Opportunity removed from Firestore.');
+  };
+
+  const handleToggleVerify = (id: string) => {
+    setOpportunities((prev) =>
+      prev.map((o) => {
+        if (o.id === id) {
+          const updated = { ...o, verified: !o.verified };
+          contentService.upsert('opportunities', id, updated);
+          return updated;
+        }
+        return o;
+      })
+    );
+    onNotify('Verification state updated in Firestore.');
+  };
+
+  const handleExportCSV = () => {
+    const headers = ['UID', 'Name', 'Phone', 'Status', 'Completion', 'State', 'Location', 'Education', 'Skills', 'Interests', 'Matched Pathway', 'Score', 'Last Active'];
+    const rows = users.map((u) => [
+      u.uid,
+      `"${u.name}"`,
+      `"${u.phone}"`,
+      u.status,
+      `${u.completionPercent}%`,
+      `"${u.state}"`,
+      `"${u.location}"`,
+      `"${u.education}"`,
+      `"${u.skills?.replace(/"/g, '""')}"`,
+      `"${u.interests?.replace(/"/g, '""')}"`,
+      `"${u.matchedPathwayName}"`,
+      u.matchScore,
+      u.lastActive,
+    ]);
+
+    const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map((e) => e.join(','))].join('\n');
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement('a');
+    link.setAttribute('href', encodedUri);
+    link.setAttribute('download', `jeevika_live_users_${Date.now()}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    onNotify('Live user assessment registry exported as CSV!');
+  };
+
+  const handleUploadNewMedia = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!mediaTitle.trim()) {
+      onNotify('कृपया शीर्षक दर्ज करें।');
+      return;
+    }
+
+    if (!editingMediaId && !mediaFile && mediaFiles.length === 0 && !mediaDirectUrl.trim() && !mediaPreview) {
+      onNotify('कृपया अपलोड करने के लिए एक या अधिक तस्वीरें चुनें अथवा इमेज URL दर्ज करें।');
+      return;
+    }
+
+    setMediaUploading(true);
+    setMediaUploadProgress(10);
+    try {
+      if (editingMediaId) {
+        let url = mediaPreview;
+        if (mediaFile) {
+          url = await uploadToCloudinary(mediaFile, mediaFolder, (pct) => {
+            setMediaUploadProgress(Math.max(10, pct));
+          });
+        } else if (mediaDirectUrl.trim()) {
+          url = mediaDirectUrl.trim();
+        }
+        await mediaStorageService.updateMediaAsset(editingMediaId, {
+          url,
+          folder: mediaFolder,
+          name: mediaTitle.trim(),
+          ctaUrl: mediaCtaUrl.trim() || undefined,
+          ctaLabel: mediaCtaLabel.trim() || undefined,
+        });
+        onNotify('मीडिया सफलतापूर्वक अपडेट किया गया! (Media updated)');
+        setEditingMediaId(null);
+      } else if (mediaFiles.length > 0) {
+        const total = mediaFiles.length;
+        const currentCategoryAssets = mediaAssets.filter((m) => m.folder === mediaFolder);
+        const maxOrder = currentCategoryAssets.length > 0
+          ? Math.max(...currentCategoryAssets.map((b) => b.order ?? 0))
+          : 0;
+
+        for (let i = 0; i < total; i++) {
+          const file = mediaFiles[i];
+          setUploadBatchStatus(`अपलोड हो रहा है (${i + 1}/${total}): ${file.name}...`);
+          const baseProgress = Math.round((i / total) * 100);
+          setMediaUploadProgress(Math.max(10, baseProgress));
+
+          const uploadedUrl = await uploadToCloudinary(file, mediaFolder, (pct) => {
+            const overall = Math.round(((i + pct / 100) / total) * 100);
+            setMediaUploadProgress(Math.max(10, overall));
+          });
+
+          const itemTitle = total > 1
+            ? `${mediaTitle.trim()} #${i + 1}`
+            : mediaTitle.trim();
+
+          await mediaStorageService.saveMediaAsset({
+            url: uploadedUrl,
+            folder: mediaFolder,
+            name: itemTitle,
+            tags: ['जीविका अवसर'],
+            used: 1,
+            time: Date.now() + i,
+            createdAt: new Date().toISOString(),
+            ctaUrl: mediaCtaUrl.trim() || undefined,
+            ctaLabel: mediaCtaLabel.trim() || undefined,
+            order: maxOrder + i + 1,
+            active: true,
+          });
+        }
+        onNotify(`सफलतापूर्वक ${total} तस्वीरें अपलोड हो गईं और गैलरी/स्लाइडर में जोड़ दी गईं!`);
+      } else {
+        let url = mediaDirectUrl.trim();
+        if (mediaFile) {
+          url = await uploadToCloudinary(mediaFile, mediaFolder, (pct) => {
+            setMediaUploadProgress(Math.max(15, pct));
+          });
+        } else if (mediaPreview && !url) {
+          url = mediaPreview;
+        }
+        if (!url) {
+          throw new Error('तस्वीर अपलोड नहीं हो सकी या अमान्य URL है।');
+        }
+
+        const currentCategoryAssets = mediaAssets.filter((m) => m.folder === mediaFolder);
+        const maxOrder = currentCategoryAssets.length > 0
+          ? Math.max(...currentCategoryAssets.map((b) => b.order ?? 0))
+          : 0;
+
+        await mediaStorageService.saveMediaAsset({
+          url,
+          folder: mediaFolder,
+          name: mediaTitle.trim(),
+          tags: ['जीविका अवसर'],
+          used: 1,
+          time: Date.now(),
+          createdAt: new Date().toISOString(),
+          ctaUrl: mediaCtaUrl.trim() || undefined,
+          ctaLabel: mediaCtaLabel.trim() || undefined,
+          order: maxOrder + 1,
+          active: true,
+        });
+        onNotify('तस्वीर अपलोड हो गई और गैलरी में सहेज दी गई!');
+      }
+
+      setMediaFile(null);
+      setMediaFiles([]);
+      setMediaPreview('');
+      setMediaPreviews([]);
+      setMediaDirectUrl('');
+      setMediaTitle('');
+      setMediaCtaUrl('');
+      setMediaCtaLabel('');
+      setUploadBatchStatus('');
+      await loadMediaAndShowcase();
+    } catch (err: any) {
+      onNotify('अपलोड विफल: ' + (err.message || 'त्रुटि हुई'));
+    } finally {
+      setMediaUploading(false);
+      setMediaUploadProgress(0);
+      setUploadBatchStatus('');
+    }
+  };
+
+  const handleDeleteMedia = async (id: string) => {
+    await mediaStorageService.updateMediaAsset(id, { active: false });
+    setConfirmActionKey(null);
+    onNotify('तस्वीर सफलतापूर्वक छिपा दी गई है (Hidden).');
+    loadMediaAndShowcase();
+  };
+
+  const handleEditMedia = (m: MediaAssetRecord) => {
+    setEditingMediaId(m.id);
+    setMediaTitle(m.name);
+    setMediaFolder(m.folder || 'banner');
+    setMediaPreview(m.url);
+    setMediaPreviews([]);
+    setMediaFiles([]);
+    setMediaFile(null);
+    setMediaDirectUrl(m.url.startsWith('http') ? m.url : '');
+    setMediaCtaUrl(m.ctaUrl || '');
+    setMediaCtaLabel(m.ctaLabel || '');
+    const formEl = document.getElementById('cloudinary-uploader-form');
+    if (formEl) formEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    onNotify(`संपादक मोड सक्रिय: "${m.name}"`);
+  };
+
+  const handleDeleteShowcase = async (id: string) => {
+    await mediaStorageService.deleteShowcaseProduct(id);
+    setConfirmActionKey(null);
+    onNotify('Product removed from showcase.');
+    loadMediaAndShowcase();
+  };
+
+  const handleSendPushNotification = async () => {
+    if (!notifTitle.trim() || !notifBody.trim()) {
+      onNotify('कृपया शीर्षक और संदेश दोनों दर्ज करें।');
+      return;
+    }
+    if (notifTarget === 'specific' && !notifTargetUserId) {
+      onNotify('कृपया विशिष्ट नागरिक का चयन करें।');
+      return;
+    }
+    setNotifSending(true);
+    try {
+      if ('Notification' in window && Notification.permission !== 'granted') {
+        await Notification.requestPermission();
+      }
+      const newNotif = {
+        id: 'notif_' + Date.now(),
+        target: notifTarget,
+        targetUserId: notifTargetUserId,
+        title: notifTitle,
+        body: notifBody,
+        createdAt: new Date().toISOString(),
+      };
+      const existingQueue = JSON.parse(localStorage.getItem('jeevika_push_queue') || '[]');
+      localStorage.setItem('jeevika_push_queue', JSON.stringify([newNotif, ...existingQueue]));
+
+      if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+        const reg = await navigator.serviceWorker.ready;
+        reg.showNotification(notifTitle, {
+          body: notifBody,
+          icon: '/icons/icon-192.svg',
+          badge: '/icons/icon-192.svg',
+        });
+      }
+      onNotify(
+        notifTarget === 'all'
+          ? `सभी ${users.length} नागरिकों को पुश नोटिफिकेशन भेज दिया गया!`
+          : 'चयनित नागरिक को पुश नोटिफिकेशन भेज दिया गया!'
+      );
+    } catch {
+      onNotify('पुश नोटिफिकेशन कतार में सहेजा गया!');
+    } finally {
+      setNotifSending(false);
+    }
+  };
+
+  const navTabs = [
+    { id: 'users', label: 'नागरिक व पंजीकरण', sub: 'User Registry', icon: 'users', badge: users.length },
+    { id: 'overview', label: 'जिला विश्लेषण', sub: 'Overview & KPI', icon: 'trending' },
+    { id: 'jobs', label: 'रोजगार व योजनाएं', sub: 'Jobs & Schemes', icon: 'briefcase', badge: opportunities.length },
+    { id: 'pathways', label: 'NSQF पाठ्यक्रम', sub: 'Skill Pathways', icon: 'layers', badge: pathways.length },
+    { id: 'districts', label: 'जिला कवरेज', sub: 'District Nodes', icon: 'map', badge: dynamicDistrictIntelligence.length },
+    { id: 'media', label: 'क्लाउडिनरी मीडिया', sub: 'बैनर व गैलरी', icon: 'sparkles', badge: mediaAssets.length },
+    { id: 'notifications', label: 'पुश ब्रॉडकास्ट', sub: 'अलर्ट व रिमाइंडर', icon: 'bell' },
+  ];
+
+  if (!isAdmin) {
+    return (
+      <main className="max-w-md mx-auto px-4 py-16 sm:py-24 text-center">
+        <div className="bg-white border border-[#DCE3EA] rounded-2xl p-6 sm:p-8 space-y-5">
+          <div className="w-16 h-16 rounded-2xl bg-red-50 text-[#9E2A2B] border border-red-200 mx-auto flex items-center justify-center">
+            <Icon name="shield" size={32} />
+          </div>
+          <div className="space-y-1.5">
+            <span className="inline-block px-2.5 py-0.5 rounded-md text-[10px] font-extrabold uppercase tracking-wider bg-red-50 text-[#9E2A2B] border border-red-200">
+              Restricted Area · सुरक्षित प्रशासनिक क्षेत्र
+            </span>
+            <h2 className="text-xl sm:text-2xl font-extrabold text-[#17365D] font-['Bricolage_Grotesque']">
+              प्रशासनिक प्रमाणीकरण आवश्यक
+            </h2>
+            <p className="text-xs text-[#5F6B76]">
+              Authorized Administrative Access Only
+            </p>
+          </div>
+          <p className="text-xs text-[#202B36] leading-relaxed">
+            यह पोर्टल केवल अधिकृत प्रशासक (Admin) के लिए सुरक्षित है। पोर्टल का डेटाबेस, नागरिक सूची और रोजगार प्रबंधन देखने के लिए कृपया लॉगिन करें।
+          </p>
+          <div className="space-y-2 pt-2">
+            <button
+              onClick={() => {
+                if (onOpenLogin) onOpenLogin();
+                else go('home');
+              }}
+              className="w-full min-h-[48px] py-3 rounded-xl bg-[#17365D] hover:bg-[#245A91] text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-2 transition-colors"
+            >
+              <Icon name="lock" size={16} />
+              <span>अधिकृत एडमिन लॉगिन (Admin Login)</span>
+            </button>
+            <button
+              onClick={() => go('home')}
+              className="w-full min-h-[44px] py-2.5 rounded-xl border border-[#DCE3EA] text-[#5F6B76] hover:text-[#17365D] font-bold text-xs transition-colors"
+            >
+              ← मुख्य पृष्ठ पर लौटें (Return Home)
+            </button>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  return (
+    <main className="max-w-7xl mx-auto px-3 sm:px-6 py-5 sm:py-7 space-y-5">
+      {/* Top Banner */}
+      <div className="bg-[#17365D] text-white rounded-2xl p-5 sm:p-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div className="space-y-1">
+          <div className="inline-flex items-center gap-2 text-[11px] font-bold uppercase tracking-wider text-[#F4B966]">
+            <Icon name="shieldCheck" size={14} />
+            <span>Super Administrator Console · लाइव प्रशासनिक केंद्र</span>
+          </div>
+          <h1 className="text-xl sm:text-2xl md:text-3xl font-extrabold tracking-tight font-['Bricolage_Grotesque']">
+            National Skill &amp; Livelihood Intelligence Platform
+          </h1>
+          <p className="text-xs sm:text-sm text-white/80">
+            लॉगिन: <strong>{currentUser?.displayName || 'Super Admin'}</strong> ({currentUser?.email || 'Admin Portal'})
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => setShowAddJobModal(true)}
+            className="min-h-[44px] px-3.5 py-2 rounded-xl bg-[#287D73] hover:bg-[#1E6058] text-white text-xs font-bold flex items-center gap-1.5 transition-colors"
+          >
+            <Icon name="plus" size={14} />
+            <span>Add Job</span>
+          </button>
+          <button
+            onClick={() => setShowAddPathwayModal(true)}
+            className="min-h-[44px] px-3.5 py-2 rounded-xl bg-[#245A91] hover:bg-[#1C4673] text-white text-xs font-bold flex items-center gap-1.5 transition-colors"
+          >
+            <Icon name="layers" size={14} />
+            <span>Add Pathway</span>
+          </button>
+          <button
+            onClick={handleExportCSV}
+            className="min-h-[44px] px-3.5 py-2 rounded-xl border border-white/25 bg-white/10 hover:bg-white/20 text-white text-xs font-bold flex items-center gap-1.5 transition-colors"
+            title="Download CSV report"
+          >
+            <Icon name="download" size={13} />
+            <span className="hidden sm:inline">Export CSV</span>
+          </button>
+          <button
+            onClick={() => {
+              if (onLogout) onLogout();
+              go('home');
+            }}
+            className="min-h-[44px] px-3.5 py-2 rounded-xl bg-[#9E2A2B] hover:bg-[#7E1F20] text-white text-xs font-bold flex items-center gap-1.5 transition-colors"
+          >
+            <Icon name="logout" size={13} />
+            <span>लॉगआउट</span>
+          </button>
+        </div>
+      </div>
+
+      {/* WhatsApp Reminder Link Banner (replaces popup window.open) */}
+      {waPreviewLink && (
+        <div className="bg-[#E9F4F2] border border-[#287D73]/30 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3 text-xs">
+          <div className="text-[#17365D]">
+            <strong>{waPreviewLink.name}</strong> (+91 {waPreviewLink.phone}) के लिए WhatsApp रिमाइंडर संदेश तैयार है।
+          </div>
+          <div className="flex items-center gap-2">
+            <a
+              href={waPreviewLink.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-4 py-2 rounded-xl bg-[#287D73] hover:bg-[#1E6058] text-white font-bold inline-flex items-center gap-1.5"
+            >
+              <Icon name="external" size={13} />
+              <span>WhatsApp में खोलें</span>
+            </a>
+            <button
+              type="button"
+              onClick={() => setWaPreviewLink(null)}
+              className="px-2.5 py-2 rounded-xl border border-[#DCE3EA] bg-white text-[#5F6B76] font-bold"
+            >
+              बंद करें
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Main Layout */}
+      <div className="flex flex-col md:flex-row gap-5 items-start">
+        {/* Desktop Sidebar */}
+        <aside className="hidden md:flex flex-col w-64 shrink-0 bg-white border border-[#DCE3EA] rounded-2xl p-3 space-y-1.5 sticky top-20">
+          <div className="px-3 py-2 text-[11px] font-bold uppercase tracking-wider text-[#5F6B76] border-b border-[#DCE3EA] mb-1">
+            Admin Modules
+          </div>
+          {navTabs.map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id as any)}
+              className={`w-full min-h-[48px] text-left p-2.5 rounded-xl font-bold text-xs flex items-center justify-between transition-colors ${
+                activeTab === tab.id
+                  ? 'bg-[#17365D] text-white'
+                  : 'text-[#5F6B76] hover:bg-[#F7F9FC] hover:text-[#17365D]'
+              }`}
+            >
+              <div className="flex items-center gap-2.5 min-w-0">
+                <Icon name={tab.icon} size={16} className={activeTab === tab.id ? 'text-[#F4B966]' : 'text-[#245A91]'} />
+                <div className="truncate">
+                  <div className="truncate">{tab.label}</div>
+                  <div className={`text-[10px] font-medium ${activeTab === tab.id ? 'text-white/70' : 'text-[#5F6B76]'}`}>
+                    {tab.sub}
+                  </div>
+                </div>
+              </div>
+              {tab.badge !== undefined && (
+                <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold tabular-nums ${
+                  activeTab === tab.id
+                    ? 'bg-white/20 text-white'
+                    : 'bg-[#F7F9FC] border border-[#DCE3EA] text-[#17365D]'
+                }`}>
+                  {tab.badge}
+                </span>
+              )}
+            </button>
+          ))}
+
+          <div className="pt-3 mt-2 border-t border-[#DCE3EA] px-2 space-y-1.5 text-[11px] text-[#5F6B76]">
+            <div className="flex items-center justify-between">
+              <span>कुल पंजीकृत:</span>
+              <strong className="text-[#17365D] tabular-nums">{users.length}</strong>
+            </div>
+            <div className="flex items-center justify-between">
+              <span>लंबित प्रोफ़ाइल:</span>
+              <strong className="text-[#D9822B] tabular-nums">{pendingUsersCount}</strong>
+            </div>
+            <div className="flex items-center justify-between">
+              <span>लाइव सक्रिय:</span>
+              <strong className="text-[#287D73] tabular-nums">{activeNowUsersCount}</strong>
+            </div>
+          </div>
+        </aside>
+
+        {/* Mobile Nav Bar */}
+        <div className="md:hidden w-full bg-white border border-[#DCE3EA] rounded-2xl p-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 font-bold text-xs text-[#17365D]">
+              <span className="text-[#5F6B76]">सेक्शन:</span>
+              <span className="px-2.5 py-1 rounded-lg bg-[#17365D] text-white text-xs font-bold flex items-center gap-1.5">
+                <Icon name={navTabs.find((t) => t.id === activeTab)?.icon || 'user'} size={13} />
+                <span>{navTabs.find((t) => t.id === activeTab)?.label}</span>
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setMobileMenuOpen((prev) => !prev)}
+              className="min-h-[40px] px-3 py-1.5 rounded-xl bg-[#F7F9FC] hover:bg-slate-100 border border-[#DCE3EA] text-xs font-bold text-[#17365D] flex items-center gap-1.5"
+            >
+              <Icon name="menu" size={14} />
+              <span>{mobileMenuOpen ? 'बंद करें' : 'मेनू बदलें'}</span>
+            </button>
+          </div>
+          {mobileMenuOpen && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 pt-2 border-t border-[#DCE3EA]">
+              {navTabs.map((tab) => (
+                <button
+                  key={tab.id}
+                  onClick={() => {
+                    setActiveTab(tab.id as any);
+                    setMobileMenuOpen(false);
+                  }}
+                  className={`min-h-[44px] p-2.5 rounded-xl text-left font-bold text-xs flex items-center justify-between transition-colors ${
+                    activeTab === tab.id
+                      ? 'bg-[#17365D] text-white'
+                      : 'bg-[#F7F9FC] text-[#5F6B76] hover:text-[#17365D] border border-[#DCE3EA]'
+                  }`}
+                >
+                  <div className="flex items-center gap-2 truncate">
+                    <Icon name={tab.icon} size={14} />
+                    <span className="truncate">{tab.label}</span>
+                  </div>
+                  {tab.badge !== undefined && (
+                    <span className="ml-2 text-[10px] px-2 py-0.5 rounded-md bg-white/20 tabular-nums">
+                      {tab.badge}
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Main Content Container */}
+        <div className="flex-1 min-w-0 w-full space-y-5">
+          {/* Global Filter & Search Bar */}
+          <div className="bg-white border border-[#DCE3EA] rounded-2xl p-3.5 sm:p-4 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-xs">
+              <span className="font-bold text-[#17365D] flex items-center gap-1 mr-1 whitespace-nowrap">
+                <Icon name="pin" size={13} /> क्षेत्र ({availableStates.length - 1} राज्य):
+              </span>
+              {availableStates.map((st) => (
+                <button
+                  key={st}
+                  onClick={() => setSelectedStateFilter(st)}
+                  className={`min-h-[36px] px-3 py-1.5 rounded-lg font-bold transition-colors whitespace-nowrap text-xs border ${
+                    selectedStateFilter === st
+                      ? 'bg-[#245A91] text-white border-[#245A91]'
+                      : 'bg-[#F7F9FC] text-[#5F6B76] hover:text-[#17365D] border-[#DCE3EA]'
+                  }`}
+                >
+                  {st}
+                </button>
+              ))}
+            </div>
+
+            <div className="relative w-full sm:w-72">
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="मोबाइल, नाम, हुनर या जिला खोजें..."
+                className="w-full min-h-[42px] pl-9 pr-8 py-2 rounded-xl border border-[#DCE3EA] text-xs font-medium focus:outline-none focus:border-[#245A91] bg-white text-[#17365D]"
+              />
+              <span className="absolute left-3 top-3 text-[#5F6B76]">
+                <Icon name="search" size={14} />
+              </span>
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery('')}
+                  aria-label="Clear search"
+                  className="absolute right-2.5 top-3 text-xs text-[#5F6B76] hover:text-[#17365D] font-bold"
+                >
+                  <Icon name="x" size={14} />
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* TAB: USERS */}
+          {activeTab === 'users' && (
+            <div className="bg-white border border-[#DCE3EA] rounded-2xl overflow-hidden space-y-4 p-4 sm:p-6">
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-3 border-b border-[#DCE3EA]">
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="text-base sm:text-lg font-extrabold text-[#17365D]">
+                      लाइव नागरिक व प्रोफ़ाइल स्थिति (Live Citizen Registry)
+                    </h3>
+                    <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-[#E9F4F2] text-[#287D73] border border-[#287D73]/25">
+                      लाइव फ़ायरबेस
+                    </span>
+                  </div>
+                  <p className="text-xs text-[#5F6B76] mt-0.5">
+                    वास्तविक पंजीकृत नागरिक, 4-अंक PIN खाते, प्रोफ़ाइल पूर्णता और WhatsApp रिमाइंडर प्रबंधन।
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1.5 p-1 bg-[#F7F9FC] border border-[#DCE3EA] rounded-xl self-start lg:self-auto text-xs font-bold">
+                  <button
+                    onClick={() => setUserStatusFilter('all')}
+                    className={`min-h-[36px] px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5 ${
+                      userStatusFilter === 'all'
+                        ? 'bg-[#17365D] text-white'
+                        : 'text-[#5F6B76] hover:text-[#17365D]'
+                    }`}
+                  >
+                    <span>सभी नागरिक</span>
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] tabular-nums ${userStatusFilter === 'all' ? 'bg-white/20' : 'bg-white border border-[#DCE3EA] text-[#17365D]'}`}>
+                      {users.length}
+                    </span>
+                  </button>
+                  <button
+                    onClick={() => setUserStatusFilter('pending')}
+                    className={`min-h-[36px] px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5 ${
+                      userStatusFilter === 'pending'
+                        ? 'bg-[#D9822B] text-white'
+                        : 'text-[#B45309] hover:text-[#17365D]'
+                    }`}
+                  >
+                    <span>अधूरा (Pending)</span>
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] tabular-nums ${userStatusFilter === 'pending' ? 'bg-white/20' : 'bg-[#FFF8EB] text-[#B45309]'}`}>
+                      {pendingUsersCount}
+                    </span>
+                  </button>
+                  <button
+                    onClick={() => setUserStatusFilter('completed')}
+                    className={`min-h-[36px] px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5 ${
+                      userStatusFilter === 'completed'
+                        ? 'bg-[#287D73] text-white'
+                        : 'text-[#287D73] hover:text-[#17365D]'
+                    }`}
+                  >
+                    <span>पूर्ण (Completed)</span>
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] tabular-nums ${userStatusFilter === 'completed' ? 'bg-white/20' : 'bg-[#E9F4F2] text-[#287D73]'}`}>
+                      {completedUsersCount}
+                    </span>
+                  </button>
+                </div>
+              </div>
+
+              {isLoadingUsers && (
+                <div className="p-10 text-center space-y-2">
+                  <div className="w-8 h-8 border-2 border-[#17365D] border-t-transparent rounded-full animate-spin mx-auto" />
+                  <p className="text-xs font-bold text-[#17365D]">फ़ायरबेस से लाइव नागरिक डेटा लोड हो रहा है...</p>
+                </div>
+              )}
+
+              {!isLoadingUsers && filteredUsers.length === 0 && (
+                <div className="p-8 text-center bg-[#F7F9FC] rounded-xl border border-dashed border-[#DCE3EA] space-y-2">
+                  <p className="font-bold text-sm text-[#17365D]">कोई नागरिक रिकॉर्ड नहीं मिला</p>
+                  <p className="text-xs text-[#5F6B76]">
+                    जब कोई नया नागरिक खाता बनाएगा, तो उसका विवरण स्वतः यहाँ दिखेगा।
+                  </p>
+                  {searchQuery && (
+                    <button
+                      onClick={() => setSearchQuery('')}
+                      className="px-3.5 py-1.5 rounded-xl bg-white border border-[#DCE3EA] text-xs font-bold text-[#17365D]"
+                    >
+                      खोज साफ़ करें
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {!isLoadingUsers && filteredUsers.length > 0 && (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-[#F7F9FC] text-[#5F6B76] border-y border-[#DCE3EA]">
+                      <tr>
+                        <th className="p-3">नागरिक (Citizen)</th>
+                        <th className="p-3">प्रोफ़ाइल स्थिति (Status)</th>
+                        <th className="p-3">सक्रियता (Activity)</th>
+                        <th className="p-3">जिला व राज्य</th>
+                        <th className="p-3">शिक्षा व हुनर</th>
+                        <th className="p-3 text-right">कार्रवाई (Actions)</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#DCE3EA]">
+                      {filteredUsers.map((u) => {
+                        const isPending = u.status === 'pending';
+                        return (
+                          <tr key={u.id} className="hover:bg-[#F7F9FC] transition-colors">
+                            <td className="p-3">
+                              <div className="font-bold text-[#17365D] text-sm flex items-center gap-2.5">
+                                <div className="w-8 h-8 rounded-full overflow-hidden bg-[#F7F9FC] border border-[#DCE3EA] flex-shrink-0 flex items-center justify-center font-bold text-xs text-[#17365D]">
+                                  {u.avatarUrl ? (
+                                    <img src={u.avatarUrl} alt={u.name} className="w-full h-full object-cover" />
+                                  ) : (
+                                    (u.name || 'U').charAt(0).toUpperCase()
+                                  )}
+                                </div>
+                                <span>{u.name}</span>
+                              </div>
+                              <div className="text-[11px] text-[#5F6B76] flex items-center gap-1 mt-0.5 tabular-nums">
+                                <Icon name="phone" size={11} className="text-[#245A91]" />
+                                <span className="font-mono font-semibold">
+                                  {u.phone ? `+91 ${u.phone}` : 'नंबर अनुपलब्ध'}
+                                </span>
+                              </div>
+                              <div className="text-[10px] text-[#5F6B76] font-mono mt-0.5 truncate max-w-[140px]">
+                                UID: {u.uid.slice(0, 14)}...
+                              </div>
+                            </td>
+
+                            <td className="p-3">
+                              {isPending ? (
+                                <div className="space-y-1.5">
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-[#FFF8EB] text-[#B45309] border border-[#FDE68A]">
+                                    अधूरा (Pending)
+                                  </span>
+                                  <div className="w-24 h-1.5 rounded-full bg-slate-200 overflow-hidden">
+                                    <div className="h-full bg-[#D9822B]" style={{ width: `${u.completionPercent}%` }} />
+                                  </div>
+                                  <div className="text-[10px] text-[#B45309] font-semibold tabular-nums">
+                                    {u.completionPercent}% ({u.missingFields.join(', ') || 'अधूरा'})
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className="space-y-1">
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-[#E9F4F2] text-[#287D73] border border-[#287D73]/25">
+                                    पूर्ण (100%)
+                                  </span>
+                                  <div className="text-[10px] text-[#287D73] font-semibold tabular-nums">
+                                    {u.matchedPathwayName} ({u.matchScore}%)
+                                  </div>
+                                </div>
+                              )}
+                            </td>
+
+                            <td className="p-3">
+                              {u.activeNow ? (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-[10px] font-bold bg-[#E9F4F2] text-[#287D73] border border-[#287D73]/25">
+                                  Active Now
+                                </span>
+                              ) : (
+                                <span className="text-[11px] text-[#5F6B76] font-medium tabular-nums">
+                                  {u.lastActive}
+                                </span>
+                              )}
+                            </td>
+
+                            <td className="p-3">
+                              <div className="font-semibold text-[#17365D]">{u.location}</div>
+                              <div className="text-[11px] text-[#5F6B76]">{u.state}</div>
+                            </td>
+
+                            <td className="p-3 max-w-[200px]">
+                              <div className="font-semibold text-[#17365D] truncate">{u.education}</div>
+                              <div className="text-[11px] text-[#5F6B76] truncate">{u.skills}</div>
+                            </td>
+
+                            <td className="p-3 text-right">
+                              <div className="inline-flex items-center gap-1.5 justify-end flex-wrap">
+                                <button
+                                  onClick={() => handleSendWhatsAppReminder(u)}
+                                  className="px-2.5 py-1.5 rounded-lg bg-[#E9F4F2] hover:bg-[#287D73]/20 text-[#287D73] border border-[#287D73]/30 font-bold text-[11px] transition-colors"
+                                >
+                                  WhatsApp
+                                </button>
+                                <button
+                                  onClick={() => setSelectedUserDetail(u)}
+                                  className="px-2.5 py-1.5 rounded-lg bg-[#17365D] hover:bg-[#245A91] text-white font-bold text-[11px] transition-colors"
+                                >
+                                  देखें
+                                </button>
+                                {confirmActionKey === `user:${u.uid}` ? (
+                                  <span className="inline-flex items-center gap-1">
+                                    <button
+                                      onClick={() => handleDeleteUser(u.uid)}
+                                      className="px-2 py-1.5 rounded-lg bg-[#9E2A2B] text-white font-bold text-[11px]"
+                                    >
+                                      हटाएं
+                                    </button>
+                                    <button
+                                      onClick={() => setConfirmActionKey(null)}
+                                      className="px-2 py-1.5 rounded-lg border border-[#DCE3EA] text-[#5F6B76] font-bold text-[11px]"
+                                    >
+                                      रद्द
+                                    </button>
+                                  </span>
+                                ) : (
+                                  <button
+                                    onClick={() => setConfirmActionKey(`user:${u.uid}`)}
+                                    className="px-2 py-1.5 rounded-lg bg-red-50 hover:bg-red-100 text-[#9E2A2B] font-bold text-[11px]"
+                                    title="हटाएं"
+                                  >
+                                    <Icon name="trash" size={13} />
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* TAB: OVERVIEW */}
+          {activeTab === 'overview' && (
+            <div className="space-y-6">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <div className="p-5 bg-white border border-[#DCE3EA] rounded-2xl space-y-1">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-[#5F6B76]">
+                    Total Assessed Beneficiaries
+                  </span>
+                  <div className="text-3xl font-extrabold text-[#17365D] tabular-nums font-['Bricolage_Grotesque']">
+                    {users.length}
+                  </div>
+                  <div className="text-xs text-[#287D73] font-semibold tabular-nums">
+                    {completedUsersCount} पूर्ण · {pendingUsersCount} अधूरा (Live Firestore)
+                  </div>
+                </div>
+
+                <div className="p-5 bg-white border border-[#DCE3EA] rounded-2xl space-y-1">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-[#5F6B76]">
+                    Verified Local Opportunities
+                  </span>
+                  <div className="text-3xl font-extrabold text-[#245A91] tabular-nums font-['Bricolage_Grotesque']">
+                    {opportunities.length}
+                  </div>
+                  <div className="text-xs text-[#5F6B76] font-medium tabular-nums">
+                    {opportunities.filter((o) => o.verified).length} Verified Employer Nodes
+                  </div>
+                </div>
+
+                <div className="p-5 bg-white border border-[#DCE3EA] rounded-2xl space-y-1">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-[#5F6B76]">
+                    NSQF Curriculum Pathways
+                  </span>
+                  <div className="text-3xl font-extrabold text-[#287D73] tabular-nums font-['Bricolage_Grotesque']">
+                    {pathways.length}
+                  </div>
+                  <div className="text-xs text-[#5F6B76] font-medium">
+                    Standardized national vocational frameworks
+                  </div>
+                </div>
+
+                <div className="p-5 bg-white border border-[#DCE3EA] rounded-2xl space-y-1">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-[#5F6B76]">
+                    Active Districts Mapped
+                  </span>
+                  <div className="text-3xl font-extrabold text-[#D9822B] tabular-nums font-['Bricolage_Grotesque']">
+                    {dynamicDistrictIntelligence.length}
+                  </div>
+                  <div className="text-xs text-[#5F6B76] font-medium tabular-nums">
+                    नागरिकों व अवसरों से स्वतः सिंक ({availableStates.length - 1} राज्य)
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-white border border-[#DCE3EA] rounded-2xl overflow-hidden space-y-4 p-5">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-base font-bold text-[#17365D]">
+                      District-wise Livelihood Intelligence &amp; Skill Demand ({filteredDistricts.length} जिले)
+                    </h3>
+                    <p className="text-xs text-[#5F6B76]">
+                      Real-time aggregation of local candidate supply versus registered industry openings.
+                    </p>
+                  </div>
+                  <span className="text-xs font-bold px-2.5 py-1 rounded-md bg-[#F7F9FC] border border-[#DCE3EA] text-[#17365D]">
+                    Scope: {selectedStateFilter}
+                  </span>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-[#F7F9FC] text-[#5F6B76] border-y border-[#DCE3EA]">
+                      <tr>
+                        <th className="p-3">District</th>
+                        <th className="p-3">State</th>
+                        <th className="p-3">Assessed Users</th>
+                        <th className="p-3">Active Jobs</th>
+                        <th className="p-3">Primary Demanded Skill</th>
+                        <th className="p-3">PMKVY / RSETI Center</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#DCE3EA]">
+                      {filteredDistricts.length === 0 ? (
+                        <tr>
+                          <td colSpan={6} className="p-6 text-center text-[#5F6B76] font-medium">
+                            इस राज्य ({selectedStateFilter}) के लिए अभी कोई जिला रिकॉर्ड उपलब्ध नहीं है।
+                          </td>
+                        </tr>
+                      ) : (
+                        filteredDistricts.map((d) => (
+                          <tr key={d.district} className="hover:bg-[#F7F9FC] transition-colors">
+                            <td className="p-3 font-bold text-[#17365D]">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span>{d.district}</span>
+                                {d.isDynamicUserDistrict && (
+                                  <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-[#F7F9FC] text-[#245A91] border border-[#DCE3EA]">
+                                    नागरिक जिला
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+                            <td className="p-3 text-[#5F6B76]">{d.state}</td>
+                            <td className="p-3 font-semibold text-[#245A91] tabular-nums">{d.users} candidates</td>
+                            <td className="p-3 font-semibold text-[#287D73] tabular-nums">{d.jobs} openings</td>
+                            <td className="p-3 text-[#202B36] font-medium">{d.topSkill}</td>
+                            <td className="p-3 text-[#287D73] font-bold">{d.pmkvyCenter}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* TAB: JOBS */}
+          {activeTab === 'jobs' && (
+            <div className="bg-white border border-[#DCE3EA] rounded-2xl overflow-hidden space-y-4 p-5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-base font-bold text-[#17365D]">
+                    Published Opportunities &amp; Schemes ({filteredJobs.length})
+                  </h3>
+                  <p className="text-xs text-[#5F6B76]">
+                    Manage verified local employment vacancies, training schemes, and self-employment units.
+                  </p>
+                </div>
+                <button
+                  onClick={() => setShowAddJobModal(true)}
+                  className="min-h-[40px] px-4 py-2 rounded-xl bg-[#287D73] hover:bg-[#1E6058] text-white text-xs font-bold flex items-center gap-1.5"
+                >
+                  <Icon name="plus" size={14} />
+                  <span>Add Opportunity</span>
+                </button>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-[#F7F9FC] text-[#5F6B76] border-y border-[#DCE3EA]">
+                    <tr>
+                      <th className="p-3">Title &amp; Org</th>
+                      <th className="p-3">Category</th>
+                      <th className="p-3">Location</th>
+                      <th className="p-3">Pay / Stipend</th>
+                      <th className="p-3">Status</th>
+                      <th className="p-3 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#DCE3EA]">
+                    {filteredJobs.map((opp) => (
+                      <tr key={opp.id} className="hover:bg-[#F7F9FC] transition-colors">
+                        <td className="p-3">
+                          <div className="font-bold text-[#17365D]">{opp.title}</div>
+                          <div className="text-[#5F6B76] text-[11px]">{opp.org}</div>
+                        </td>
+                        <td className="p-3">
+                          <span className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-[#F7F9FC] border border-[#DCE3EA] text-[#17365D]">
+                            {opp.type}
+                          </span>
+                        </td>
+                        <td className="p-3 text-[#5F6B76]">{opp.loc}</td>
+                        <td className="p-3 font-semibold text-[#287D73] tabular-nums">{opp.pay}</td>
+                        <td className="p-3">
+                          <button
+                            onClick={() => handleToggleVerify(opp.id)}
+                            className={`px-2.5 py-1 rounded-md text-[10px] font-bold border transition-colors ${
+                              opp.verified
+                                ? 'bg-[#E9F4F2] text-[#287D73] border-[#287D73]/30'
+                                : 'bg-[#FFF8EB] text-[#B45309] border-[#FDE68A]'
+                            }`}
+                          >
+                            {opp.verified ? 'Verified' : 'Pending Review'}
+                          </button>
+                        </td>
+                        <td className="p-3 text-right">
+                          {confirmActionKey === `job:${opp.id}` ? (
+                            <span className="inline-flex items-center gap-1.5">
+                              <button
+                                onClick={() => handleDeleteJob(opp.id)}
+                                className="px-2.5 py-1 rounded bg-[#9E2A2B] text-white font-bold text-[11px]"
+                              >
+                                Confirm
+                              </button>
+                              <button
+                                onClick={() => setConfirmActionKey(null)}
+                                className="px-2 py-1 rounded border border-[#DCE3EA] text-[#5F6B76] font-bold text-[11px]"
+                              >
+                                Cancel
+                              </button>
+                            </span>
+                          ) : (
+                            <button
+                              onClick={() => setConfirmActionKey(`job:${opp.id}`)}
+                              className="text-[#9E2A2B] font-bold hover:underline text-[11px]"
+                            >
+                              Delete
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* TAB: PATHWAYS */}
+          {activeTab === 'pathways' && (
+            <div className="bg-white border border-[#DCE3EA] rounded-2xl overflow-hidden space-y-4 p-5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-base font-bold text-[#17365D]">
+                    NSQF Skill Development Pathways ({pathways.length})
+                  </h3>
+                  <p className="text-xs text-[#5F6B76]">
+                    Manage curriculum tracks, qualification levels, and demand indices.
+                  </p>
+                </div>
+                <button
+                  onClick={() => setShowAddPathwayModal(true)}
+                  className="min-h-[40px] px-4 py-2 rounded-xl bg-[#245A91] hover:bg-[#17365D] text-white text-xs font-bold flex items-center gap-1.5"
+                >
+                  <Icon name="plus" size={14} />
+                  <span>Add Pathway</span>
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {pathways.map((path) => (
+                  <div key={path.id} className="p-4 bg-[#F7F9FC] border border-[#DCE3EA] rounded-xl flex flex-col justify-between space-y-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-white border border-[#DCE3EA] text-[#245A91] tabular-nums">
+                          NSQF Level {path.nsqf}
+                        </span>
+                        <h4 className="font-bold text-sm text-[#17365D] mt-1">{path.name}</h4>
+                        <div className="text-xs text-[#287D73] font-semibold">{path.hi}</div>
+                      </div>
+                      <span className="text-[11px] font-bold text-[#5F6B76]">{path.duration}</span>
+                    </div>
+
+                    <div className="text-xs text-[#5F6B76]">{path.demandNote}</div>
+
+                    <div className="pt-2 border-t border-[#DCE3EA] flex items-center justify-between text-xs">
+                      <span className="text-[11px] font-semibold text-[#5F6B76] tabular-nums">
+                        {path.stages.length} Learning Stages
+                      </span>
+                      {confirmActionKey === `path:${path.id}` ? (
+                        <span className="inline-flex items-center gap-1.5">
+                          <button
+                            onClick={() => {
+                              setPathways((prev) => prev.filter((p) => p.id !== path.id));
+                              setConfirmActionKey(null);
+                              onNotify('Pathway removed.');
+                            }}
+                            className="px-2.5 py-1 rounded bg-[#9E2A2B] text-white font-bold text-[11px]"
+                          >
+                            Confirm
+                          </button>
+                          <button
+                            onClick={() => setConfirmActionKey(null)}
+                            className="px-2 py-1 rounded border border-[#DCE3EA] bg-white text-[#5F6B76] font-bold text-[11px]"
+                          >
+                            Cancel
+                          </button>
+                        </span>
+                      ) : (
+                        <button
+                          onClick={() => setConfirmActionKey(`path:${path.id}`)}
+                          className="text-[#9E2A2B] font-bold hover:underline text-[11px]"
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* TAB: DISTRICTS */}
+          {activeTab === 'districts' && (
+            <div className="bg-white border border-[#DCE3EA] rounded-2xl overflow-hidden space-y-4 p-5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-[#DCE3EA]">
+                <div>
+                  <h3 className="text-base font-bold text-[#17365D] flex items-center gap-2">
+                    <Icon name="map" size={18} className="text-[#245A91]" />
+                    <span>All-India Operational District Nodes ({filteredDistricts.length} जिले उपलब्ध)</span>
+                  </h3>
+                  <p className="text-xs text-[#5F6B76] mt-0.5">
+                    पंजीकृत नागरिकों व योजनाओं से गतिशील रूप से जुड़ते जिले।
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold px-2.5 py-1 rounded-md bg-[#F7F9FC] border border-[#DCE3EA] text-[#17365D]">
+                    क्षेत्र: {selectedStateFilter}
+                  </span>
+                  <span className="text-xs font-bold px-2.5 py-1 rounded-md bg-[#E9F4F2] text-[#287D73] border border-[#287D73]/25 tabular-nums">
+                    कुल सक्रिय: {dynamicDistrictIntelligence.length}
+                  </span>
+                </div>
+              </div>
+
+              {filteredDistricts.length === 0 ? (
+                <div className="p-8 text-center bg-[#F7F9FC] rounded-xl border border-dashed border-[#DCE3EA] space-y-2">
+                  <p className="font-bold text-xs text-[#17365D]">
+                    इस राज्य ({selectedStateFilter}) में अभी कोई जिला रिकॉर्ड नहीं है।
+                  </p>
+                  <p className="text-xs text-[#5F6B76]">
+                    जैसे ही कोई नागरिक इस राज्य के किसी जिले से रजिस्टर करेगा, वह जिला यहाँ स्वचालित रूप से दिखाई देगा।
+                  </p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {filteredDistricts.map((item) => (
+                    <div key={item.district} className="p-4 bg-[#F7F9FC] border border-[#DCE3EA] rounded-xl space-y-2 hover:border-[#245A91] transition-colors">
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <h4 className="font-bold text-sm text-[#17365D] flex items-center gap-1.5 flex-wrap">
+                            <span>{item.district}</span>
+                            {item.isDynamicUserDistrict && (
+                              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-white text-[#245A91] border border-[#DCE3EA]">
+                                नया जिला
+                              </span>
+                            )}
+                          </h4>
+                          <span className="text-[11px] text-[#5F6B76] font-medium">
+                            {item.state}
+                          </span>
+                        </div>
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-[#E9F4F2] text-[#287D73] shrink-0">
+                          {item.state}
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2 text-xs pt-1">
+                        <div className="p-2.5 bg-white rounded-lg border border-[#DCE3EA]">
+                          <div className="text-[10px] text-[#5F6B76]">Registered Candidates</div>
+                          <div className="font-bold text-[#17365D] flex items-center gap-1 tabular-nums">
+                            <span>{item.users}</span>
+                            <span className="text-[10px] font-normal text-[#5F6B76]">नागरिक</span>
+                          </div>
+                        </div>
+                        <div className="p-2.5 bg-white rounded-lg border border-[#DCE3EA]">
+                          <div className="text-[10px] text-[#5F6B76]">Active Openings</div>
+                          <div className="font-bold text-[#287D73] flex items-center gap-1 tabular-nums">
+                            <span>{item.jobs}</span>
+                            <span className="text-[10px] font-normal text-[#5F6B76]">अवसर</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="text-[11px] text-[#5F6B76] pt-1 border-t border-[#DCE3EA]">
+                        <strong className="text-[#17365D]">Top Skill Demand:</strong> {item.topSkill}
+                      </div>
+                      <div className="text-[11px] text-[#287D73] font-semibold flex items-center gap-1.5">
+                        <Icon name="check" size={12} />
+                        <span>{item.pmkvyCenter}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* TAB: MEDIA */}
+          {activeTab === 'media' && (
+            <div className="space-y-6">
+              <div id="cloudinary-uploader-form" className="bg-white border border-[#DCE3EA] rounded-2xl p-6 space-y-4">
+                <div className="pb-2 border-b border-[#DCE3EA]">
+                  <h3 className="text-base font-bold text-[#17365D]">
+                    मीडिया अपलोडर (Upload Media)
+                  </h3>
+                  <p className="text-xs text-[#5F6B76]">
+                    बैनर, कौशल प्रशिक्षण गैलरी या उत्पाद चित्र अपलोड करें।
+                  </p>
+                </div>
+
+                {editingMediaId && (
+                  <div className="p-3 bg-[#FFF8EB] border border-[#FDE68A] rounded-xl flex items-center justify-between text-xs text-[#B45309] font-bold">
+                    <span>संपादक मोड: आप विवरण अपडेट कर रहे हैं</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingMediaId(null);
+                        setMediaTitle('');
+                        setMediaCtaUrl('');
+                        setMediaCtaLabel('');
+                        setMediaPreview('');
+                        setMediaPreviews([]);
+                        setMediaFile(null);
+                        setMediaFiles([]);
+                        setMediaDirectUrl('');
+                      }}
+                      className="px-2.5 py-1 rounded bg-white border border-[#FDE68A] text-[#B45309] font-bold text-[11px]"
+                    >
+                      रद्द करें
+                    </button>
+                  </div>
+                )}
+
+                <form onSubmit={handleUploadNewMedia} className="space-y-4 text-xs">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block font-bold text-[#17365D] mb-1">
+                        शीर्षक (Title / Caption) *
+                      </label>
+                      <input
+                        type="text"
+                        value={mediaTitle}
+                        onChange={(e) => setMediaTitle(e.target.value)}
+                        placeholder="उदा: पीएम कौशल विकास योजना 2026"
+                        required
+                        className="w-full min-h-[42px] p-2.5 rounded-xl border border-[#DCE3EA] bg-white text-[#17365D] font-medium"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-bold text-[#17365D] mb-1">
+                        विभाग / सेक्शन (Section Folder) *
+                      </label>
+                      <select
+                        value={mediaFolder}
+                        onChange={(e) => setMediaFolder(e.target.value)}
+                        className="w-full min-h-[42px] p-2.5 rounded-xl border border-[#DCE3EA] bg-white text-[#17365D] font-bold"
+                      >
+                        <option value="banner">हीरो बैनर (Hero Banner Slider)</option>
+                        <option value="training">कौशल प्रशिक्षण गैलरी (Training Gallery)</option>
+                        <option value="showcase">ग्रामीण उत्पाद शोकेस (Showcase)</option>
+                        <option value="job">रोजगार अवसर (Job Thumbnail)</option>
+                        <option value="general">सामान्य / अन्य (General / Other)</option>
+                        <option value="user_avatars">प्रोफ़ाइल अवतार (User Avatars)</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block font-bold text-[#17365D] mb-1">
+                        क्लिक लिंक URL (CTA Link - ऐच्छिक)
+                      </label>
+                      <input
+                        type="text"
+                        value={mediaCtaUrl}
+                        onChange={(e) => setMediaCtaUrl(e.target.value)}
+                        placeholder="उदा: /opportunities या https://..."
+                        className="w-full min-h-[42px] p-2.5 rounded-xl border border-[#DCE3EA] bg-white text-[#17365D] font-medium"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-bold text-[#17365D] mb-1">
+                        बटन लेबल (CTA Button Text - ऐच्छिक)
+                      </label>
+                      <input
+                        type="text"
+                        value={mediaCtaLabel}
+                        onChange={(e) => setMediaCtaLabel(e.target.value)}
+                        placeholder="उदा: अभी आवेदन करें, जानकारी देखें"
+                        className="w-full min-h-[42px] p-2.5 rounded-xl border border-[#DCE3EA] bg-white text-[#17365D] font-medium"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-3.5 bg-[#F7F9FC] border border-[#DCE3EA] rounded-xl">
+                    <div>
+                      <label className="block font-bold text-[#17365D] mb-1.5">
+                        तस्वीरें चुनें (Select Files)
+                      </label>
+                      <input
+                        type="file"
+                        multiple
+                        accept="image/*"
+                        onChange={(e) => {
+                          const files = e.target.files ? Array.from(e.target.files) : [];
+                          if (files.length > 0) {
+                            setMediaFiles(files);
+                            setMediaPreviews(files.map((f) => URL.createObjectURL(f)));
+                            setMediaFile(files[0]);
+                            setMediaPreview(URL.createObjectURL(files[0]));
+                          }
+                        }}
+                        className="w-full p-2 rounded-xl border border-[#DCE3EA] bg-white text-[#17365D]"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-bold text-[#17365D] mb-1.5">
+                        इमेज URL पेस्ट करें (Direct URL)
+                      </label>
+                      <input
+                        type="url"
+                        value={mediaDirectUrl}
+                        onChange={(e) => {
+                          setMediaDirectUrl(e.target.value);
+                          if (e.target.value.trim()) {
+                            setMediaPreview(e.target.value.trim());
+                          }
+                        }}
+                        placeholder="https://..."
+                        className="w-full min-h-[42px] p-2.5 rounded-xl border border-[#DCE3EA] bg-white text-[#17365D] font-medium"
+                      />
+                    </div>
+                  </div>
+
+                  {mediaPreviews.length > 0 && (
+                    <div className="p-3 bg-white border border-[#DCE3EA] rounded-xl space-y-2">
+                      <div className="flex items-center justify-between text-xs font-bold text-[#17365D]">
+                        <span className="tabular-nums">चुनी गई तस्वीरें ({mediaPreviews.length}):</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMediaFiles([]);
+                            setMediaPreviews([]);
+                            setMediaFile(null);
+                            setMediaPreview('');
+                          }}
+                          className="text-[#9E2A2B] hover:underline text-[11px]"
+                        >
+                          सभी हटाएं
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-2">
+                        {mediaPreviews.map((prev, pIdx) => (
+                          <div key={pIdx} className="relative rounded-lg overflow-hidden border border-[#DCE3EA] h-24 bg-[#F7F9FC] group">
+                            <img src={prev} alt={`Preview ${pIdx + 1}`} className="w-full h-full object-cover" />
+                            <span className="absolute top-1 left-1 px-1.5 py-0.5 rounded text-[9px] font-bold bg-[#17365D] text-white tabular-nums">
+                              #{pIdx + 1}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const newFiles = mediaFiles.filter((_, i) => i !== pIdx);
+                                const newPrev = mediaPreviews.filter((_, i) => i !== pIdx);
+                                setMediaFiles(newFiles);
+                                setMediaPreviews(newPrev);
+                                if (newFiles.length > 0) {
+                                  setMediaFile(newFiles[0]);
+                                  setMediaPreview(newPrev[0]);
+                                } else {
+                                  setMediaFile(null);
+                                  setMediaPreview('');
+                                }
+                              }}
+                              className="absolute top-1 right-1 w-5 h-5 rounded-full bg-[#9E2A2B] text-white flex items-center justify-center text-[10px] font-bold"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {!mediaPreviews.length && mediaPreview && (
+                    <div className="p-3 bg-[#F7F9FC] border border-[#DCE3EA] rounded-xl space-y-2">
+                      <span className="text-[11px] font-bold text-[#17365D]">छवि पूर्वावलोकन (Preview):</span>
+                      <div className="max-h-48 overflow-hidden rounded-lg">
+                        <img src={mediaPreview} alt="Preview" className="w-full h-48 object-cover rounded-lg" />
+                      </div>
+                    </div>
+                  )}
+
+                  {mediaUploading && (
+                    <div className="space-y-1.5 p-3 bg-[#E9F4F2] rounded-xl border border-[#287D73]/25">
+                      <div className="flex justify-between text-xs font-bold text-[#287D73] tabular-nums">
+                        <span>{uploadBatchStatus || 'अपलोड हो रहा है...'}</span>
+                        <span>{mediaUploadProgress}%</span>
+                      </div>
+                      <div className="w-full h-2 rounded-full bg-slate-200 overflow-hidden">
+                        <div
+                          className="h-full bg-[#287D73] transition-all duration-300"
+                          style={{ width: `${mediaUploadProgress}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="flex justify-end">
+                    <button
+                      type="submit"
+                      disabled={mediaUploading}
+                      className="min-h-[44px] px-6 py-2.5 rounded-xl bg-[#287D73] hover:bg-[#1E6058] text-white font-bold transition-colors disabled:opacity-50"
+                    >
+                      {mediaUploading
+                        ? 'अपलोड हो रहा है...'
+                        : editingMediaId
+                        ? 'बदलाव सहेजें (Save Changes)'
+                        : 'मीडिया अपलोड करें (Upload)'}
+                    </button>
+                  </div>
+                </form>
+              </div>
+
+              {/* Media Gallery Grid */}
+              <div className="bg-white border border-[#DCE3EA] rounded-2xl p-6 space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-[#DCE3EA]">
+                  <h3 className="text-base font-bold text-[#17365D] tabular-nums">
+                    अपलोड की गई मीडिया सामग्री ({filteredMediaAssets.length})
+                  </h3>
+
+                  <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                    {[
+                      { id: 'all', label: `सभी (${mediaAssets.length})` },
+                      { id: 'banner', label: `होम बैनर (${heroBannerAssets.length})` },
+                      { id: 'training', label: 'कौशल गैलरी' },
+                      { id: 'showcase', label: 'उत्पाद' },
+                      { id: 'job', label: 'नौकरी' },
+                    ].map((cat) => (
+                      <button
+                        key={cat.id}
+                        type="button"
+                        onClick={() => setMediaCategoryFilter(cat.id)}
+                        className={`px-3 py-1.5 rounded-lg font-bold transition-colors whitespace-nowrap border ${
+                          mediaCategoryFilter === cat.id
+                            ? 'bg-[#17365D] text-white border-[#17365D]'
+                            : 'bg-[#F7F9FC] text-[#5F6B76] hover:text-[#17365D] border-[#DCE3EA]'
+                        }`}
+                      >
+                        {cat.label}
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const count = await mediaStorageService.syncLocalMediaToFirestore();
+                        await loadMediaAndShowcase();
+                        onNotify(
+                          count > 0
+                            ? `${count} स्थानीय तस्वीरें Firestore क्लाउड में सुरक्षित सिंक की गईं!`
+                            : 'सभी तस्वीरें क्लाउड डेटाबेस से लाइव सिंक हैं!'
+                        );
+                      }}
+                      className="px-3 py-1.5 rounded-lg font-bold bg-[#E9F4F2] hover:bg-[#287D73]/20 text-[#287D73] border border-[#287D73]/30 flex items-center gap-1"
+                    >
+                      <Icon name="refresh" size={13} />
+                      <span>क्लाउड सिंक</span>
+                    </button>
+                  </div>
+                </div>
+
+                {filteredMediaAssets.length === 0 ? (
+                  <div className="p-8 text-center bg-[#F7F9FC] rounded-xl border border-dashed border-[#DCE3EA] space-y-1">
+                    <p className="font-bold text-sm text-[#17365D]">कोई मीडिया उपलब्ध नहीं है।</p>
+                    <p className="text-xs text-[#5F6B76]">ऊपर दिए गए फ़ॉर्म से तस्वीरें चुनें और अपलोड करें।</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                    {filteredMediaAssets.map((m, idx) => {
+                      const isBanner = m.folder === 'banner' || m.folder === 'hero_banner';
+                      const bannerIdx = isBanner ? heroBannerAssets.findIndex((b) => b.id === m.id) : -1;
+                      const displayOrder = typeof m.order === 'number'
+                        ? m.order
+                        : (bannerIdx >= 0 ? bannerIdx + 1 : idx + 1);
+
+                      return (
+                        <div
+                          key={m.id}
+                          className={`rounded-2xl border overflow-hidden bg-white flex flex-col ${
+                            isBanner && m.active === false
+                              ? 'border-dashed border-slate-300 opacity-60 bg-[#F7F9FC]'
+                              : 'border-[#DCE3EA] hover:border-[#245A91]'
+                          }`}
+                        >
+                          <div className="h-44 bg-slate-900 relative group overflow-hidden">
+                            <img
+                              src={m.url}
+                              alt={m.name}
+                              className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                            />
+                            <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
+                            <div className="absolute top-2.5 left-2.5 flex items-center gap-1.5 flex-wrap">
+                              <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-black/70 text-white uppercase">
+                                {m.folder}
+                              </span>
+                              {isBanner && (
+                                <span
+                                  className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
+                                    m.active !== false
+                                      ? 'bg-[#287D73] text-white'
+                                      : 'bg-slate-700 text-slate-200'
+                                  }`}
+                                >
+                                  {m.active !== false ? 'सक्रिय' : 'छिपा हुआ'}
+                                </span>
+                              )}
+                            </div>
+
+                            {isBanner && (
+                              <div className="absolute top-2.5 right-2.5">
+                                <span className="px-2.5 py-1 rounded-md text-xs font-bold bg-[#17365D] text-white tabular-nums">
+                                  स्थान #{displayOrder}
+                                </span>
+                              </div>
+                            )}
+
+                            <div className="absolute bottom-2.5 left-2.5 right-2.5 text-white">
+                              <p className="font-bold text-sm line-clamp-1">{m.name}</p>
+                              {m.ctaUrl && (
+                                <p className="text-[10px] text-cyan-200 truncate mt-0.5 font-semibold">
+                                  {m.ctaLabel || 'लिंक'}: {m.ctaUrl}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="p-3.5 flex-1 flex flex-col justify-between space-y-3 bg-[#F7F9FC]">
+                            {isBanner && (
+                              <div className="flex items-center justify-between gap-2 bg-white p-2 rounded-xl border border-[#DCE3EA]">
+                                <div className="flex items-center gap-1.5">
+                                  <span className="text-[11px] font-bold text-[#17365D]">क्रम (Pos):</span>
+                                  <input
+                                    type="number"
+                                    min="1"
+                                    max="99"
+                                    value={displayOrder}
+                                    onChange={(e) => {
+                                      const val = parseInt(e.target.value, 10);
+                                      if (!isNaN(val)) handleSetSlideOrder(m.id, val);
+                                    }}
+                                    className="w-12 p-1 text-center font-bold text-xs rounded-lg border border-[#DCE3EA] bg-[#F7F9FC] text-[#17365D] tabular-nums"
+                                  />
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    disabled={bannerIdx <= 0}
+                                    onClick={() => handleMoveSlide(m.id, 'up')}
+                                    className="px-2.5 py-1 rounded-lg text-xs font-bold bg-[#17365D] text-white hover:bg-[#245A91] disabled:opacity-30 disabled:pointer-events-none flex items-center gap-1"
+                                  >
+                                    <Icon name="arrowUp" size={13} />
+                                    <span>ऊपर</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={bannerIdx < 0 || bannerIdx >= heroBannerAssets.length - 1}
+                                    onClick={() => handleMoveSlide(m.id, 'down')}
+                                    className="px-2.5 py-1 rounded-lg text-xs font-bold bg-[#17365D] text-white hover:bg-[#245A91] disabled:opacity-30 disabled:pointer-events-none flex items-center gap-1"
+                                  >
+                                    <Icon name="arrowDown" size={13} />
+                                    <span>नीचे</span>
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+
+                            <div className="flex items-center flex-wrap gap-1.5 pt-1 border-t border-[#DCE3EA]">
+                              {isBanner && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleMediaActive(m.id, m.active)}
+                                  className={`py-1.5 px-2.5 rounded-lg text-[11px] font-bold border flex items-center gap-1 ${
+                                    m.active !== false
+                                      ? 'bg-white hover:bg-slate-100 text-[#5F6B76] border-[#DCE3EA]'
+                                      : 'bg-[#E9F4F2] text-[#287D73] border-[#287D73]/30'
+                                  }`}
+                                >
+                                  <Icon name={m.active !== false ? 'eyeOff' : 'eye'} size={13} />
+                                  <span>{m.active !== false ? 'छिपाएं' : 'सक्रिय'}</span>
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => handleEditMedia(m)}
+                                className="py-1.5 px-2.5 rounded-lg text-[11px] font-bold bg-white hover:bg-slate-100 text-[#17365D] border border-[#DCE3EA] flex items-center gap-1"
+                              >
+                                <Icon name="edit" size={12} />
+                                <span>संपादित</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  navigator.clipboard.writeText(m.url);
+                                  onNotify('URL कॉपी हो गया!');
+                                }}
+                                className="py-1.5 px-2.5 rounded-lg text-[11px] font-bold bg-white hover:bg-slate-100 text-[#245A91] border border-[#DCE3EA] flex items-center gap-1"
+                              >
+                                <Icon name="copy" size={12} />
+                                <span>URL</span>
+                              </button>
+                              {confirmActionKey === `media:${m.id}` ? (
+                                <span className="inline-flex items-center gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteMedia(m.id)}
+                                    className="py-1.5 px-2 rounded-lg text-[11px] font-bold bg-[#9E2A2B] text-white"
+                                  >
+                                    पुष्टि
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setConfirmActionKey(null)}
+                                    className="py-1.5 px-2 rounded-lg text-[11px] font-bold bg-white border border-[#DCE3EA] text-[#5F6B76]"
+                                  >
+                                    रद्द
+                                  </button>
+                                </span>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => setConfirmActionKey(`media:${m.id}`)}
+                                  className="py-1.5 px-2.5 rounded-lg text-[11px] font-bold bg-red-50 hover:bg-red-100 text-[#9E2A2B] border border-red-200 flex items-center gap-1"
+                                >
+                                  <Icon name="trash" size={12} />
+                                  <span>हटाएं</span>
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Showcase Moderation */}
+              {showcaseProducts.length > 0 && (
+                <div className="bg-white border border-[#DCE3EA] rounded-2xl p-6 space-y-4">
+                  <h3 className="text-base font-bold text-[#17365D] tabular-nums">
+                    ग्रामीण उत्पाद प्रदर्शनी प्रबंधन (Showcase Moderation · {showcaseProducts.length})
+                  </h3>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {showcaseProducts.map((p) => (
+                      <div key={p.id} className="p-3 bg-[#F7F9FC] border border-[#DCE3EA] rounded-xl flex items-center gap-3">
+                        <img src={p.imageUrl} alt={p.title} className="w-16 h-16 rounded-lg object-cover flex-shrink-0 border border-[#DCE3EA]" />
+                        <div className="flex-1 min-w-0">
+                          <div className="font-bold text-xs text-[#17365D] truncate">{p.title}</div>
+                          <div className="text-[11px] text-[#5F6B76] truncate">{p.artisanName} · {p.location}</div>
+                          <div className="pt-1">
+                            {confirmActionKey === `show:${p.id}` ? (
+                              <span className="inline-flex items-center gap-2 text-[11px]">
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteShowcase(p.id)}
+                                  className="text-[#9E2A2B] font-extrabold hover:underline"
+                                >
+                                  हटाएं
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setConfirmActionKey(null)}
+                                  className="text-[#5F6B76] font-bold hover:underline"
+                                >
+                                  रद्द
+                                </button>
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => setConfirmActionKey(`show:${p.id}`)}
+                                className="text-[11px] text-[#9E2A2B] font-bold hover:underline"
+                              >
+                                Remove Listing
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* TAB: PUSH NOTIFICATIONS */}
+          {activeTab === 'notifications' && (
+            <div className="bg-white border border-[#DCE3EA] rounded-2xl overflow-hidden space-y-6 p-6 sm:p-8 max-w-3xl text-left">
+              <div>
+                <h3 className="text-lg font-extrabold text-[#17365D] flex items-center gap-2">
+                  <Icon name="bell" size={20} className="text-[#245A91]" />
+                  <span>Background Push Notification &amp; Alert Center</span>
+                </h3>
+                <p className="text-xs sm:text-sm text-[#5F6B76] mt-1">
+                  Send background push notifications and WhatsApp reminders to registered citizens.
+                </p>
+              </div>
+
+              <div className="space-y-4 pt-2">
+                <div>
+                  <label className="block text-xs font-bold text-[#17365D] uppercase mb-1.5">
+                    Target Recipient (प्राप्तकर्ता)
+                  </label>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setNotifTarget('all')}
+                      className={`min-h-[48px] p-3 rounded-xl border text-left font-bold text-xs sm:text-sm flex items-center justify-between transition-colors ${
+                        notifTarget === 'all'
+                          ? 'border-[#245A91] bg-[#245A91]/10 text-[#17365D]'
+                          : 'border-[#DCE3EA] bg-white text-[#5F6B76] hover:border-[#245A91]'
+                      }`}
+                    >
+                      <span className="flex items-center gap-2">
+                        <Icon name="users" size={16} className="text-[#245A91]" />
+                        <span>All Citizens (सभी नागरिक)</span>
+                      </span>
+                      <span className="px-2 py-0.5 rounded bg-[#245A91] text-white text-[10px] tabular-nums">
+                        {users.length} citizens
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setNotifTarget('specific')}
+                      className={`min-h-[48px] p-3 rounded-xl border text-left font-bold text-xs sm:text-sm flex items-center justify-between transition-colors ${
+                        notifTarget === 'specific'
+                          ? 'border-[#245A91] bg-[#245A91]/10 text-[#17365D]'
+                          : 'border-[#DCE3EA] bg-white text-[#5F6B76] hover:border-[#245A91]'
+                      }`}
+                    >
+                      <span className="flex items-center gap-2">
+                        <Icon name="user" size={16} className="text-[#245A91]" />
+                        <span>Specific Citizen (विशिष्ट नागरिक)</span>
+                      </span>
+                    </button>
+                  </div>
+                </div>
+
+                {notifTarget === 'specific' && (
+                  <div>
+                    <label className="block text-xs font-bold text-[#17365D] uppercase mb-1">
+                      Select Target Citizen
+                    </label>
+                    <select
+                      value={notifTargetUserId}
+                      onChange={(e) => setNotifTargetUserId(e.target.value)}
+                      className="w-full min-h-[44px] p-3 rounded-xl border border-[#DCE3EA] text-xs sm:text-sm font-semibold bg-white text-[#17365D]"
+                    >
+                      <option value="">-- Choose Citizen --</option>
+                      {users.map((u) => (
+                        <option key={u.uid} value={u.uid}>
+                          {u.name} ({u.phone ? `+91 ${u.phone}` : 'No phone'} - {u.location || 'India'} - {u.status})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-xs font-bold text-[#17365D] uppercase mb-1">
+                    Notification Title (शीर्षक)
+                  </label>
+                  <input
+                    type="text"
+                    value={notifTitle}
+                    onChange={(e) => setNotifTitle(e.target.value)}
+                    placeholder="e.g. नया रोजगार अवसर उपलब्ध है!"
+                    className="w-full min-h-[44px] p-3 rounded-xl border border-[#DCE3EA] text-xs sm:text-sm font-semibold bg-white text-[#17365D]"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-[#17365D] uppercase mb-1">
+                    Notification Message Body (संदेश)
+                  </label>
+                  <textarea
+                    rows={3}
+                    value={notifBody}
+                    onChange={(e) => setNotifBody(e.target.value)}
+                    placeholder="Enter notification message..."
+                    className="w-full p-3 rounded-xl border border-[#DCE3EA] text-xs sm:text-sm font-medium bg-white text-[#17365D]"
+                  />
+                </div>
+
+                <div className="pt-2">
+                  <button
+                    onClick={handleSendPushNotification}
+                    disabled={notifSending}
+                    className="w-full sm:w-auto min-h-[48px] px-6 py-3 rounded-xl bg-[#245A91] hover:bg-[#17365D] text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
+                  >
+                    <Icon name="bell" size={16} />
+                    <span>{notifSending ? 'Broadcasting...' : 'Push Notification Broadcast'}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* MODAL 1: ADD JOB */}
+      {showAddJobModal && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 border border-[#DCE3EA] space-y-4 text-left max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-3 border-b border-[#DCE3EA]">
+              <h3 className="text-base font-bold text-[#17365D] flex items-center gap-2">
+                <Icon name="plus" size={16} className="text-[#245A91]" />
+                <span>Add Verified Job Opportunity</span>
+              </h3>
+              <button
+                onClick={() => setShowAddJobModal(false)}
+                className="w-8 h-8 rounded-lg bg-[#F7F9FC] text-[#5F6B76] hover:text-[#17365D] flex items-center justify-center text-sm font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateJob} className="space-y-3 text-xs">
+              <div>
+                <label className="block font-bold text-[#17365D] mb-1">Job Title *</label>
+                <input
+                  type="text"
+                  value={jobTitle}
+                  onChange={(e) => setJobTitle(e.target.value)}
+                  placeholder="e.g. Solar PV Assistant or CSC Operator"
+                  required
+                  className="w-full min-h-[42px] p-2.5 rounded-xl border border-[#DCE3EA] text-[#17365D] font-medium"
+                />
+              </div>
+              <div>
+                <label className="block font-bold text-[#17365D] mb-1">Company / Organization *</label>
+                <input
+                  type="text"
+                  value={jobOrg}
+                  onChange={(e) => setJobOrg(e.target.value)}
+                  placeholder="e.g. Gramin Urja Samiti or CSC Partner"
+                  required
+                  className="w-full min-h-[42px] p-2.5 rounded-xl border border-[#DCE3EA] text-[#17365D] font-medium"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-[#17365D] mb-1">Type</label>
+                  <select
+                    value={jobType}
+                    onChange={(e) => setJobType(e.target.value as any)}
+                    className="w-full min-h-[42px] p-2.5 rounded-xl border border-[#DCE3EA] bg-white text-[#17365D]"
+                  >
+                    <option value="Job">Job (नौकरी)</option>
+                    <option value="Training">Training (प्रशिक्षण)</option>
+                    <option value="Self-employment">Self-employment (स्वरोजगार)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-bold text-[#17365D] mb-1">State</label>
+                  <select
+                    value={jobState}
+                    onChange={(e) => setJobState(e.target.value)}
+                    className="w-full min-h-[42px] p-2.5 rounded-xl border border-[#DCE3EA] bg-white text-[#17365D] font-medium"
+                  >
+                    {availableStates.filter((s) => s !== 'All India').map((st) => (
+                      <option key={st} value={st}>{st}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-[#17365D] mb-1">District / Town</label>
+                  <input
+                    type="text"
+                    value={jobLoc}
+                    onChange={(e) => setJobLoc(e.target.value)}
+                    placeholder="e.g. Maharajganj town"
+                    className="w-full min-h-[42px] p-2.5 rounded-xl border border-[#DCE3EA] text-[#17365D]"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-[#17365D] mb-1">Salary / Remuneration</label>
+                  <input
+                    type="text"
+                    value={jobPay}
+                    onChange={(e) => setJobPay(e.target.value)}
+                    placeholder="e.g. ₹9,000 - ₹13,000 / month"
+                    className="w-full min-h-[42px] p-2.5 rounded-xl border border-[#DCE3EA] text-[#17365D]"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block font-bold text-[#17365D] mb-1">Eligibility Criteria</label>
+                <input
+                  type="text"
+                  value={jobEligibility}
+                  onChange={(e) => setJobEligibility(e.target.value)}
+                  placeholder="e.g. 10th pass with basic smartphone fluency"
+                  className="w-full min-h-[42px] p-2.5 rounded-xl border border-[#DCE3EA] text-[#17365D]"
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-[#17365D] mb-1">Contact Details / Coordinator Office</label>
+                <input
+                  type="text"
+                  value={jobContact}
+                  onChange={(e) => setJobContact(e.target.value)}
+                  placeholder="e.g. District Coordinator, Vikas Bhavan, Room 102"
+                  className="w-full min-h-[42px] p-2.5 rounded-xl border border-[#DCE3EA] text-[#17365D]"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-[#DCE3EA]">
+                <button
+                  type="button"
+                  onClick={() => setShowAddJobModal(false)}
+                  className="min-h-[40px] px-4 py-2 rounded-xl border border-[#DCE3EA] font-bold text-[#5F6B76]"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="min-h-[40px] px-5 py-2 rounded-xl bg-[#287D73] hover:bg-[#1E6058] text-white font-bold"
+                >
+                  Publish Listing
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 2: ADD PATHWAY */}
+      {showAddPathwayModal && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 border border-[#DCE3EA] space-y-4 text-left">
+            <div className="flex items-center justify-between pb-3 border-b border-[#DCE3EA]">
+              <h3 className="text-base font-bold text-[#17365D] flex items-center gap-2">
+                <Icon name="layers" size={16} className="text-[#245A91]" />
+                <span>Add NSQF Skill Pathway</span>
+              </h3>
+              <button
+                onClick={() => setShowAddPathwayModal(false)}
+                className="w-8 h-8 rounded-lg bg-[#F7F9FC] text-[#5F6B76] hover:text-[#17365D] flex items-center justify-center text-sm font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleCreatePathway} className="space-y-3 text-xs">
+              <div>
+                <label className="block font-bold text-[#17365D] mb-1">Pathway Title (English) *</label>
+                <input
+                  type="text"
+                  value={pathwayName}
+                  onChange={(e) => setPathwayName(e.target.value)}
+                  placeholder="e.g. Drone Pilot & Agri-Surveyor"
+                  required
+                  className="w-full min-h-[42px] p-2.5 rounded-xl border border-[#DCE3EA] text-[#17365D] font-medium"
+                />
+              </div>
+              <div>
+                <label className="block font-bold text-[#17365D] mb-1">Hindi Title *</label>
+                <input
+                  type="text"
+                  value={pathwayHi}
+                  onChange={(e) => setPathwayHi(e.target.value)}
+                  placeholder="उदा. ड्रोन पायलट व कृषि सर्वेक्षक"
+                  required
+                  className="w-full min-h-[42px] p-2.5 rounded-xl border border-[#DCE3EA] text-[#17365D]"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-[#17365D] mb-1">NSQF Level (1 to 8)</label>
+                  <select
+                    value={pathwayNsqf}
+                    onChange={(e) => setPathwayNsqf(Number(e.target.value))}
+                    className="w-full min-h-[42px] p-2.5 rounded-xl border border-[#DCE3EA] bg-white text-[#17365D]"
+                  >
+                    {[1, 2, 3, 4, 5, 6, 7].map((lvl) => (
+                      <option key={lvl} value={lvl}>Level {lvl}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-bold text-[#17365D] mb-1">Duration</label>
+                  <input
+                    type="text"
+                    value={pathwayDuration}
+                    onChange={(e) => setPathwayDuration(e.target.value)}
+                    placeholder="e.g. 3 months"
+                    className="w-full min-h-[42px] p-2.5 rounded-xl border border-[#DCE3EA] text-[#17365D]"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block font-bold text-[#17365D] mb-1">Job Role Description</label>
+                <input
+                  type="text"
+                  value={pathwayRole}
+                  onChange={(e) => setPathwayRole(e.target.value)}
+                  placeholder="e.g. Certified Drone Operator for Farming"
+                  className="w-full min-h-[42px] p-2.5 rounded-xl border border-[#DCE3EA] text-[#17365D]"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-[#DCE3EA]">
+                <button
+                  type="button"
+                  onClick={() => setShowAddPathwayModal(false)}
+                  className="min-h-[40px] px-4 py-2 rounded-xl border border-[#DCE3EA] font-bold text-[#5F6B76]"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="min-h-[40px] px-5 py-2 rounded-xl bg-[#245A91] hover:bg-[#17365D] text-white font-bold"
+                >
+                  Create Pathway
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 3: VIEW CITIZEN DOSSIER */}
+      {selectedUserDetail && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 border border-[#DCE3EA] space-y-4 text-left max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-3 border-b border-[#DCE3EA]">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className={`text-[10px] font-bold px-2.5 py-0.5 rounded-md border ${
+                    selectedUserDetail.status === 'completed'
+                      ? 'bg-[#E9F4F2] text-[#287D73] border-[#287D73]/30'
+                      : 'bg-[#FFF8EB] text-[#B45309] border-[#FDE68A]'
+                  }`}>
+                    {selectedUserDetail.status === 'completed' ? 'पूर्ण प्रोफ़ाइल' : 'अधूरा प्रोफ़ाइल'}
+                  </span>
+                  {selectedUserDetail.activeNow && (
+                    <span className="inline-flex items-center gap-1 text-[10px] font-bold text-[#287D73] bg-[#E9F4F2] px-2 py-0.5 rounded-md border border-[#287D73]/25">
+                      Active Now
+                    </span>
+                  )}
+                </div>
+                <h3 className="text-lg font-extrabold text-[#17365D] mt-1">
+                  {selectedUserDetail.name}
+                </h3>
+              </div>
+              <button
+                onClick={() => setSelectedUserDetail(null)}
+                className="w-8 h-8 rounded-lg bg-[#F7F9FC] text-[#5F6B76] hover:text-[#17365D] flex items-center justify-center text-sm font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-3.5 bg-[#F7F9FC] border border-[#DCE3EA] rounded-xl space-y-2">
+              <div className="flex items-center justify-between text-xs font-bold text-[#17365D]">
+                <span>प्रोफ़ाइल पूर्णता स्तर (Completion)</span>
+                <span className={`tabular-nums ${selectedUserDetail.completionPercent === 100 ? 'text-[#287D73]' : 'text-[#B45309]'}`}>
+                  {selectedUserDetail.completionPercent}%
+                </span>
+              </div>
+              <div className="w-full h-2 rounded-full bg-slate-200 overflow-hidden">
+                <div
+                  className={`h-full transition-all ${selectedUserDetail.completionPercent === 100 ? 'bg-[#287D73]' : 'bg-[#D9822B]'}`}
+                  style={{ width: `${selectedUserDetail.completionPercent}%` }}
+                />
+              </div>
+              {selectedUserDetail.missingFields.length > 0 && (
+                <div className="text-[11px] text-[#B45309] font-semibold flex items-center gap-1">
+                  <span>बाकी विवरण:</span>
+                  <span>{selectedUserDetail.missingFields.join(', ')}</span>
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div className="grid grid-cols-2 gap-2">
+                <div className="p-3 bg-[#F7F9FC] rounded-xl border border-[#DCE3EA]">
+                  <span className="text-[10px] uppercase font-bold text-[#5F6B76]">मोबाइल नंबर</span>
+                  <div className="font-bold text-[#17365D] mt-0.5 flex items-center gap-1 tabular-nums">
+                    <Icon name="phone" size={12} className="text-[#245A91]" />
+                    <span className="font-mono text-sm">{selectedUserDetail.phone ? `+91 ${selectedUserDetail.phone}` : 'नंबर अनुपलब्ध'}</span>
+                  </div>
+                  <div className="text-[10px] text-[#287D73] font-semibold mt-0.5">सत्यापित 4-Digit PIN खाता</div>
+                </div>
+                <div className="p-3 bg-[#F7F9FC] rounded-xl border border-[#DCE3EA]">
+                  <span className="text-[10px] uppercase font-bold text-[#5F6B76]">जिला व राज्य</span>
+                  <div className="font-bold text-[#17365D] mt-0.5">{selectedUserDetail.location}</div>
+                  <div className="text-[10px] text-[#5F6B76]">{selectedUserDetail.state}</div>
+                </div>
+              </div>
+
+              <div className="p-3 bg-[#F7F9FC] rounded-xl border border-[#DCE3EA] space-y-1">
+                <span className="text-[10px] uppercase font-bold text-[#5F6B76]">शिक्षा स्तर (Education)</span>
+                <div className="font-bold text-[#17365D]">{selectedUserDetail.education}</div>
+              </div>
+
+              <div className="p-3 bg-[#F7F9FC] rounded-xl border border-[#DCE3EA] space-y-1">
+                <span className="text-[10px] uppercase font-bold text-[#5F6B76]">हुनर व कौशल (Recorded Skills)</span>
+                <div className="text-[#202B36] font-medium">{selectedUserDetail.skills}</div>
+              </div>
+
+              <div className="p-3 bg-[#F7F9FC] rounded-xl border border-[#DCE3EA] space-y-1">
+                <span className="text-[10px] uppercase font-bold text-[#5F6B76]">कार्य रुचि व मोबिलिटी</span>
+                <div className="text-[#202B36] font-medium">
+                  {selectedUserDetail.interests} · <strong>प्राथमिकता:</strong> {selectedUserDetail.workType} ({selectedUserDetail.mobility})
+                </div>
+              </div>
+
+              <div className="p-3.5 bg-[#E9F4F2] border border-[#287D73]/30 rounded-xl space-y-1">
+                <div className="flex items-center justify-between text-xs font-bold text-[#17365D]">
+                  <span>अनुशंसित NSQF पाथवे:</span>
+                  <span className="text-[#287D73] tabular-nums">{selectedUserDetail.matchScore}% Match Score</span>
+                </div>
+                <div className="font-bold text-sm text-[#17365D]">
+                  {selectedUserDetail.matchedPathwayName}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-2 pt-3 border-t border-[#DCE3EA]">
+              <button
+                onClick={() => handleSendWhatsAppReminder(selectedUserDetail)}
+                className="w-full sm:w-auto min-h-[42px] px-4 py-2 rounded-xl bg-[#287D73] hover:bg-[#1E6058] text-white font-bold text-xs flex items-center justify-center gap-1.5"
+              >
+                <span>WhatsApp पर रिमाइंडर भेजें</span>
+              </button>
+
+              <div className="flex items-center gap-2 w-full sm:w-auto">
+                {confirmActionKey === `modal-user:${selectedUserDetail.uid}` ? (
+                  <>
+                    <button
+                      onClick={() => handleDeleteUser(selectedUserDetail.uid)}
+                      className="min-h-[42px] px-3 py-2 rounded-xl bg-[#9E2A2B] text-white font-bold text-xs"
+                    >
+                      पुष्टि करें
+                    </button>
+                    <button
+                      onClick={() => setConfirmActionKey(null)}
+                      className="min-h-[42px] px-3 py-2 rounded-xl border border-[#DCE3EA] text-[#5F6B76] font-bold text-xs"
+                    >
+                      रद्द
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    onClick={() => setConfirmActionKey(`modal-user:${selectedUserDetail.uid}`)}
+                    className="min-h-[42px] px-3 py-2 rounded-xl bg-red-50 hover:bg-red-100 text-[#9E2A2B] font-bold text-xs border border-red-200"
+                  >
+                    खाता मिटाएं
+                  </button>
+                )}
+                <button
+                  onClick={() => setSelectedUserDetail(null)}
+                  className="flex-1 sm:flex-none min-h-[42px] px-4 py-2 rounded-xl bg-[#17365D] hover:bg-[#245A91] text-white font-bold text-xs"
+                >
+                  बंद करें
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </main>
+  );
+};
