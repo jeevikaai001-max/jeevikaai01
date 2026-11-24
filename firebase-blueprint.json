@@ -135,6 +135,41 @@
         "ctaLabel": { "type": "string", "maxLength": 100 }
       },
       "required": ["id", "name", "benefit"]
+    },
+    "SubAdmin": {
+      "title": "SubAdmin",
+      "description": "Authorized Gmail sub-administrator managed by the Super Admin",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "maxLength": 150 },
+        "name": { "type": "string", "maxLength": 120 },
+        "note": { "type": "string", "maxLength": 200 },
+        "active": { "type": "boolean" },
+        "addedBy": { "type": "string", "maxLength": 150 },
+        "addedAt": { "type": "string", "maxLength": 64 },
+        "lastLoginAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["email", "active", "addedBy", "addedAt"]
+    },
+    "AdminActivityLog": {
+      "title": "AdminActivityLog",
+      "description": "Immutable audit log entry recording add, update, and delete actions by admins and sub-admins",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "actorEmail": { "type": "string", "maxLength": 150 },
+        "actorName": { "type": "string", "maxLength": 120 },
+        "actorRole": { "type": "string", "enum": ["admin", "sub_admin"] },
+        "action": { "type": "string", "enum": ["ADD", "UPDATE", "DELETE"] },
+        "section": { "type": "string", "maxLength": 64 },
+        "targetTitle": { "type": "string", "maxLength": 240 },
+        "targetId": { "type": "string", "maxLength": 128 },
+        "details": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "timestampMs": { "type": "number" }
+      },
+      "required": ["actorEmail", "actorRole", "action", "section", "targetTitle", "createdAt", "timestampMs"]
     }
   },
   "firestore": {
@@ -165,6 +200,14 @@
     "/schemes/{schemeId}": {
       "schema": "GovernmentScheme",
       "description": "Government schemes and grant listings"
+    },
+    "/sub_admins/{emailKey}": {
+      "schema": "SubAdmin",
+      "description": "Authorized sub-admin accounts keyed by normalized lowercase Gmail address"
+    },
+    "/admin_activity_logs/{logId}": {
+      "schema": "AdminActivityLog",
+      "description": "Immutable audit trail of admin and sub-admin additions, edits, and deletions"
     }
   }
 }

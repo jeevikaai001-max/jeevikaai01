@@ -60,30 +60,67 @@ export interface AppUser {
   email: string | null;
   displayName: string | null;
   isAnonymous: boolean;
-  role?: 'beneficiary' | 'admin';
+  role?: 'beneficiary' | 'admin' | 'sub_admin';
   /** 10-digit mobile number for accounts created through the assisted (mobile + PIN) flow */
   phone?: string;
   /** true when the user was created by the offline/local fallback and has no real Firebase session */
   isLocal?: boolean;
 }
 
-// Admin accounts logic.
-export const ADMIN_EMAILS: string[] = [
+export type AdminActivityAction = 'ADD' | 'UPDATE' | 'DELETE';
+
+export interface SubAdminRecord {
+  email: string;
+  name: string;
+  note?: string;
+  active: boolean;
+  addedBy: string;
+  addedAt: string;
+  lastLoginAt?: string;
+  updatedAt?: string;
+}
+
+export interface AdminActivityRecord {
+  id: string;
+  actorEmail: string;
+  actorName: string;
+  actorRole: 'admin' | 'sub_admin';
+  action: AdminActivityAction;
+  section: string;
+  targetTitle: string;
+  targetId?: string;
+  details?: string;
+  createdAt: string;
+  timestampMs: number;
+}
+
+// Primary Super Administrator accounts (full control including Sub-Admin management).
+export const SUPER_ADMIN_EMAILS: string[] = [
   'ayushgupt640@gmail.com',
   'admin@jeevikaai.org',
   'admin@jeevika.gov.in',
   'support@jeevikaai.org'
 ];
 
-export const isAdminEmail = (email?: string | null): boolean => {
+export const ADMIN_EMAILS: string[] = SUPER_ADMIN_EMAILS;
+
+export const isSuperAdminEmail = (email?: string | null): boolean => {
   if (!email) return false;
-  const clean = String(email).trim().toLowerCase();
-  return ADMIN_EMAILS.includes(clean);
+  const cleanEmail = String(email).trim().toLowerCase();
+  return SUPER_ADMIN_EMAILS.includes(cleanEmail);
 };
 
-/** Admin when signed in with authorized admin credentials, Google sign-in, or admin role */
+export const isAdminEmail = isSuperAdminEmail;
+
+export const isSuperAdminUser = (user?: AppUser | null): boolean =>
+  Boolean(user) && (user?.role === 'admin' || isSuperAdminEmail(user?.email));
+
+export const isSubAdminUser = (user?: AppUser | null): boolean =>
+  Boolean(user) && user?.role === 'sub_admin' && !isSuperAdminEmail(user?.email);
+
+/** True ONLY for verified Super Admins or active registered Sub-Admins */
 export const isAdminUser = (user?: AppUser | null): boolean =>
-  Boolean(user) && (user?.role === 'admin' || Boolean(user?.email && !user?.email?.endsWith(PHONE_EMAIL_DOMAIN)));
+  Boolean(user) && (user?.role === 'admin' || user?.role === 'sub_admin' || isSuperAdminEmail(user?.email));
 
 // --- Assisted accounts (mobile number + 4-digit PIN) -------------------------------------------
 // People who cannot manage e-mail/passwords get an account from the JeevikaAI assistant using only
@@ -242,17 +279,32 @@ class AuthService {
     this.init();
   }
 
-  private toAppUser(fbUser: FirebaseUser): AppUser {
+  private toAppUser(fbUser: FirebaseUser, resolvedRole?: 'beneficiary' | 'admin' | 'sub_admin', displayNameOverride?: string): AppUser {
     const email = fbUser.email;
     const phone = email && email.endsWith('@' + PHONE_EMAIL_DOMAIN) ? email.split('@')[0] : undefined;
+    const role = resolvedRole || (isSuperAdminEmail(email) ? 'admin' : 'beneficiary');
     return {
       uid: fbUser.uid,
       email,
-      displayName: fbUser.displayName,
+      displayName: fbUser.displayName || displayNameOverride || null,
       isAnonymous: fbUser.isAnonymous,
-      role: isAdminEmail(email) ? 'admin' : 'beneficiary',
+      role,
       phone
     };
+  }
+
+  private async resolveAppUser(fbUser: FirebaseUser): Promise<AppUser> {
+    const email = fbUser.email ? fbUser.email.trim().toLowerCase() : '';
+    if (isSuperAdminEmail(email)) {
+      return this.toAppUser(fbUser, 'admin');
+    }
+    if (email && !email.endsWith('@' + PHONE_EMAIL_DOMAIN) && fbUser.emailVerified) {
+      const subAdmin = await subAdminService.checkSubAdminAccess(email);
+      if (subAdmin && subAdmin.active) {
+        return this.toAppUser(fbUser, 'sub_admin', subAdmin.name || undefined);
+      }
+    }
+    return this.toAppUser(fbUser, 'beneficiary');
   }
 
   private mapAccountError(err: any): AccountError {
@@ -577,9 +629,9 @@ class AuthService {
       try {
         this.auth = getAuth(getFirebaseApp());
 
-        onAuthStateChanged(this.auth, (fbUser: FirebaseUser | null) => {
+        onAuthStateChanged(this.auth, async (fbUser: FirebaseUser | null) => {
           if (fbUser) {
-            this.currentUser = this.toAppUser(fbUser);
+            this.currentUser = await this.resolveAppUser(fbUser);
           } else if (!this.currentUser?.isLocal) {
             this.currentUser = null;
           }
@@ -650,8 +702,8 @@ class AuthService {
     if (isRealFirebaseConfigured && this.auth) {
       try {
         const res = await signInWithEmailAndPassword(this.auth, cleanEmail, pass);
-        const user = this.toAppUser(res.user);
-        if (adminAttempt && !isAdminEmail(user.email)) {
+        const user = await this.resolveAppUser(res.user);
+        if (adminAttempt && !isAdminUser(user)) {
           throw new Error('इस खाते के पास प्रशासनिक अनुमति नहीं है।');
         }
         this.currentUser = user;
@@ -683,17 +735,22 @@ class AuthService {
     return user;
   }
 
-  /** Google sign-in. Google accounts always have a verified email, which firestore.rules require for admin. */
+  /**
+   * Google sign-in. Strictly authorizes Super Admins and active Sub-Admins registered in /sub_admins.
+   * Unauthorized Google accounts receive role 'beneficiary' and are blocked from Admin Panel.
+   */
   public async loginWithGoogle(): Promise<AppUser> {
     if (!this.auth) {
       throw new Error('Google लॉगिन के लिए इंटरनेट आवश्यक है। (Google sign-in needs an online Firebase connection)');
     }
     try {
-      const res = await signInWithPopup(this.auth, new GoogleAuthProvider());
-      const user: AppUser = {
-        ...this.toAppUser(res.user),
-        role: 'admin'
-      };
+      const provider = new GoogleAuthProvider();
+      provider.setCustomParameters({ prompt: 'select_account' });
+      const res = await signInWithPopup(this.auth, provider);
+      const user = await this.resolveAppUser(res.user);
+      if (user.role === 'sub_admin' && user.email) {
+        subAdminService.recordSubAdminLogin(user.email).catch(() => {});
+      }
       this.currentUser = user;
       this.notifyListeners();
       return user;
@@ -1215,3 +1272,244 @@ export const contentService = {
     }
   }
 };
+
+// ============================================================================
+// Sub-Admin RBAC Management & Immutable 7-Day Activity Audit Trail
+// ============================================================================
+const EMAIL_REGEX = /^[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}$/;
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+
+export const subAdminService = {
+  normalizeEmail(raw: string): string {
+    return String(raw || '').trim().toLowerCase();
+  },
+
+  isValidEmail(raw: string): boolean {
+    const email = this.normalizeEmail(raw);
+    return email.length >= 5 && email.length <= 150 && EMAIL_REGEX.test(email);
+  },
+
+  /** Checks whether an email is an active Sub-Admin in Firestore /sub_admins/{email} */
+  async checkSubAdminAccess(rawEmail: string): Promise<SubAdminRecord | null> {
+    const email = this.normalizeEmail(rawEmail);
+    if (!this.isValidEmail(email) || !isRealFirebaseConfigured) return null;
+    try {
+      const snap = await getDoc(doc(getDb(), 'sub_admins', email));
+      if (!snap.exists()) return null;
+      const data = snap.data() as SubAdminRecord;
+      if (data.active !== true) return null;
+      return { ...data, email: data.email || email };
+    } catch (err: any) {
+      console.warn('Sub-admin lookup notice:', err?.code || err?.message || err);
+      return null;
+    }
+  },
+
+  /** Updates lastLoginAt timestamp when an active Sub-Admin logs in via Google */
+  async recordSubAdminLogin(rawEmail: string): Promise<void> {
+    const email = this.normalizeEmail(rawEmail);
+    if (!this.isValidEmail(email) || !isRealFirebaseConfigured) return;
+    try {
+      const now = new Date().toISOString();
+      await setDoc(
+        doc(getDb(), 'sub_admins', email),
+        clean({ lastLoginAt: now, updatedAt: now }),
+        { merge: true }
+      );
+    } catch (err: any) {
+      console.warn('Sub-admin login stamp notice:', err?.code || err?.message || err);
+    }
+  },
+
+  /** Real-time subscription to all Sub-Admins (Super Admin only) */
+  subscribeSubAdmins(
+    onUpdate: (items: SubAdminRecord[]) => void,
+    onError?: (error: any) => void
+  ): () => void {
+    if (!isRealFirebaseConfigured) {
+      onUpdate([]);
+      return () => {};
+    }
+    try {
+      return onSnapshot(
+        collection(getDb(), 'sub_admins'),
+        (snapshot) => {
+          const list = snapshot.docs
+            .map((d) => {
+              const data = d.data() as Partial<SubAdminRecord>;
+              return {
+                email: data.email || d.id,
+                name: data.name || (data.email || d.id).split('@')[0],
+                note: data.note || '',
+                active: data.active !== false,
+                addedBy: data.addedBy || 'Super Admin',
+                addedAt: data.addedAt || new Date().toISOString(),
+                lastLoginAt: data.lastLoginAt,
+                updatedAt: data.updatedAt,
+              } as SubAdminRecord;
+            })
+            .sort((a, b) => new Date(b.addedAt).getTime() - new Date(a.addedAt).getTime());
+          onUpdate(list);
+        },
+        (error) => {
+          console.warn('Sub-admins subscription error:', error?.code || error?.message);
+          if (onError) onError(error);
+        }
+      );
+    } catch (err) {
+      if (onError) onError(err);
+      return () => {};
+    }
+  },
+
+  /** Adds or reactivates a Sub-Admin by Gmail address (Super Admin only) */
+  async addSubAdmin(input: {
+    email: string;
+    name?: string;
+    note?: string;
+    addedBy: string;
+  }): Promise<SubAdminRecord> {
+    const email = this.normalizeEmail(input.email);
+    if (!this.isValidEmail(email)) {
+      throw new Error('कृपया एक वैध Gmail / Email पता दर्ज करें। (Please enter a valid Gmail address)');
+    }
+    if (isSuperAdminEmail(email)) {
+      throw new Error('यह ईमेल पहले से ही Super Admin है।');
+    }
+    const now = new Date().toISOString();
+    const record: SubAdminRecord = {
+      email,
+      name: (input.name || '').trim().slice(0, 120) || email.split('@')[0],
+      note: (input.note || '').trim().slice(0, 200),
+      active: true,
+      addedBy: this.normalizeEmail(input.addedBy) || 'super-admin',
+      addedAt: now,
+      updatedAt: now,
+    };
+
+    if (!isRealFirebaseConfigured) {
+      throw new Error('Firebase कनेक्शन उपलब्ध नहीं है।');
+    }
+
+    await setDoc(doc(getDb(), 'sub_admins', email), clean(record));
+    return record;
+  },
+
+  /** Enables or pauses a Sub-Admin's access */
+  async toggleSubAdminStatus(rawEmail: string, active: boolean): Promise<void> {
+    const email = this.normalizeEmail(rawEmail);
+    if (!this.isValidEmail(email) || !isRealFirebaseConfigured) return;
+    await setDoc(
+      doc(getDb(), 'sub_admins', email),
+      clean({ active: Boolean(active), updatedAt: new Date().toISOString() }),
+      { merge: true }
+    );
+  },
+
+  /** Permanently revokes and deletes a Sub-Admin */
+  async removeSubAdmin(rawEmail: string): Promise<void> {
+    const email = this.normalizeEmail(rawEmail);
+    if (!this.isValidEmail(email) || !isRealFirebaseConfigured) return;
+    await deleteDoc(doc(getDb(), 'sub_admins', email));
+  },
+
+  /** Records an immutable ADD / UPDATE / DELETE activity log entry for the current admin or sub-admin */
+  async logAdminActivity(entry: {
+    action: AdminActivityAction;
+    section: string;
+    targetTitle: string;
+    targetId?: string;
+    details?: string;
+    actor?: AppUser | null;
+  }): Promise<void> {
+    if (!isRealFirebaseConfigured) return;
+    const actor = entry.actor || authService.getCurrentUser();
+    if (!actor || !actor.email || !isAdminUser(actor)) return;
+
+    const actorEmail = this.normalizeEmail(actor.email);
+    const actorRole: 'admin' | 'sub_admin' = isSuperAdminUser(actor) ? 'admin' : 'sub_admin';
+    const nowMs = Date.now();
+    const logId = `act_${nowMs}_${Math.random().toString(36).slice(2, 8)}`;
+
+    const payload: AdminActivityRecord = {
+      id: logId,
+      actorEmail,
+      actorName: (actor.displayName || actorEmail.split('@')[0]).slice(0, 120),
+      actorRole,
+      action: entry.action,
+      section: String(entry.section || 'general').slice(0, 64),
+      targetTitle: String(entry.targetTitle || 'Item').trim().slice(0, 240) || 'Item',
+      targetId: entry.targetId ? String(entry.targetId).slice(0, 128) : undefined,
+      details: entry.details ? String(entry.details).trim().slice(0, 500) : undefined,
+      createdAt: new Date(nowMs).toISOString(),
+      timestampMs: nowMs,
+    };
+
+    try {
+      await setDoc(doc(getDb(), 'admin_activity_logs', logId), clean(payload));
+    } catch (err: any) {
+      console.warn('Could not write admin activity log:', err?.code || err?.message || err);
+    }
+  },
+
+  /**
+   * Real-time subscription to the last N days (default 7 days) of admin activity logs.
+   * When actorEmailFilter is provided, queries only that actor's logs (safe for Sub-Admin rules & zero composite index needed).
+   */
+  subscribeRecentActivity(
+    days: number,
+    onUpdate: (logs: AdminActivityRecord[]) => void,
+    onError?: (error: any) => void,
+    actorEmailFilter?: string
+  ): () => void {
+    if (!isRealFirebaseConfigured) {
+      onUpdate([]);
+      return () => {};
+    }
+    const windowMs = (days > 0 ? days : 7) * 24 * 60 * 60 * 1000;
+    try {
+      const colRef = collection(getDb(), 'admin_activity_logs');
+      const sourceRef = actorEmailFilter
+        ? query(colRef, where('actorEmail', '==', this.normalizeEmail(actorEmailFilter)))
+        : colRef;
+
+      return onSnapshot(
+        sourceRef,
+        (snapshot) => {
+          const cutoff = Date.now() - Math.min(windowMs, SEVEN_DAYS_MS * 4);
+          const logs = snapshot.docs
+            .map((d) => {
+              const data = d.data() as Partial<AdminActivityRecord>;
+              const ts = typeof data.timestampMs === 'number'
+                ? data.timestampMs
+                : (data.createdAt ? new Date(data.createdAt).getTime() : 0);
+              return {
+                id: data.id || d.id,
+                actorEmail: this.normalizeEmail(data.actorEmail || ''),
+                actorName: data.actorName || (data.actorEmail || '').split('@')[0] || 'Admin',
+                actorRole: data.actorRole === 'admin' ? 'admin' : 'sub_admin',
+                action: (data.action === 'ADD' || data.action === 'DELETE' || data.action === 'UPDATE') ? data.action : 'UPDATE',
+                section: data.section || 'general',
+                targetTitle: data.targetTitle || 'Activity',
+                targetId: data.targetId,
+                details: data.details,
+                createdAt: data.createdAt || new Date(ts || Date.now()).toISOString(),
+                timestampMs: ts,
+              } as AdminActivityRecord;
+            })
+            .filter((item) => item.timestampMs >= cutoff)
+            .sort((a, b) => b.timestampMs - a.timestampMs);
+          onUpdate(logs);
+        },
+        (error) => {
+          console.warn('Activity logs subscription error:', error?.code || error?.message);
+          if (onError) onError(error);
+        }
+      );
+    } catch (err) {
+      if (onError) onError(err);
+      return () => {};
+    }
+  }
+};
+

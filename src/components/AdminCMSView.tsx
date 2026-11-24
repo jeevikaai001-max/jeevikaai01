@@ -2,7 +2,19 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Icon } from './Icons';
 import { Opportunity, Pathway, AppView, MediaAssetRecord, ShowcaseProduct } from '../types';
 import { JOBS, PATHWAYS } from '../data/mockData';
-import { AppUser, isAdminUser, contentService, firestoreService, AdminUserRecord } from '../services/firebase';
+import {
+  AppUser,
+  isAdminUser,
+  isSuperAdminUser,
+  isSubAdminUser,
+  contentService,
+  firestoreService,
+  subAdminService,
+  AdminUserRecord,
+  SubAdminRecord,
+  AdminActivityRecord,
+  AdminActivityAction,
+} from '../services/firebase';
 import { mediaStorageService, uploadToCloudinary } from '../services/cloudinaryService';
 
 interface AdminCMSViewProps {
@@ -43,9 +55,24 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
   onLogout,
 }) => {
   const isAdmin = isAdminUser(currentUser);
+  const isSuperAdmin = isSuperAdminUser(currentUser);
+  const isSubAdmin = isSubAdminUser(currentUser);
 
-  const [activeTab, setActiveTab] = useState<'overview' | 'users' | 'jobs' | 'pathways' | 'districts' | 'media' | 'notifications'>('users');
+  const [activeTab, setActiveTab] = useState<'overview' | 'users' | 'jobs' | 'pathways' | 'districts' | 'media' | 'notifications' | 'sub_admins'>('users');
   const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
+
+  // Sub-Admin management & 7-day activity state
+  const [subAdmins, setSubAdmins] = useState<SubAdminRecord[]>([]);
+  const [activityLogs, setActivityLogs] = useState<AdminActivityRecord[]>([]);
+  const [subAdminEmailInput, setSubAdminEmailInput] = useState<string>('');
+  const [subAdminNameInput, setSubAdminNameInput] = useState<string>('');
+  const [subAdminNoteInput, setSubAdminNoteInput] = useState<string>('');
+  const [subAdminSubmitting, setSubAdminSubmitting] = useState<boolean>(false);
+  const [subAdminError, setSubAdminError] = useState<string>('');
+  const [subAdminRulesError, setSubAdminRulesError] = useState<boolean>(false);
+  const [selectedSubAdminEmail, setSelectedSubAdminEmail] = useState<string | null>(null);
+  const [activityActionFilter, setActivityActionFilter] = useState<'ALL' | AdminActivityAction>('ALL');
+  const activityPanelRef = useRef<HTMLDivElement | null>(null);
 
   const [selectedStateFilter, setSelectedStateFilter] = useState<string>('All India');
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -154,6 +181,61 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
       unsub();
     };
   }, []);
+
+  // Subscribe to Sub-Admins (Super Admin only) & Last 7 Days Activity Logs
+  useEffect(() => {
+    if (!isAdmin || !currentUser?.email) return;
+
+    let unsubSubAdmins = () => {};
+    if (isSuperAdmin) {
+      unsubSubAdmins = subAdminService.subscribeSubAdmins(
+        (list) => {
+          setSubAdmins(list);
+          setSubAdminRulesError(false);
+        },
+        (err) => {
+          if (err?.code === 'permission-denied') {
+            setSubAdminRulesError(true);
+          }
+        }
+      );
+    }
+
+    const unsubLogs = subAdminService.subscribeRecentActivity(
+      7,
+      (logs) => {
+        setActivityLogs(logs);
+      },
+      (err) => {
+        if (err?.code === 'permission-denied') {
+          setSubAdminRulesError(true);
+        }
+      },
+      isSuperAdmin ? undefined : currentUser.email
+    );
+
+    return () => {
+      unsubSubAdmins();
+      unsubLogs();
+    };
+  }, [isAdmin, isSuperAdmin, currentUser?.email]);
+
+  const logActivity = (
+    action: AdminActivityAction,
+    section: string,
+    targetTitle: string,
+    details?: string,
+    targetId?: string
+  ) => {
+    subAdminService.logAdminActivity({
+      action,
+      section,
+      targetTitle,
+      targetId,
+      details,
+      actor: currentUser,
+    });
+  };
 
   useEffect(() => {
     try {
@@ -396,6 +478,13 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
     );
 
     await mediaStorageService.reorderMedia(reorderedItems);
+    logActivity(
+      'UPDATE',
+      'media',
+      targetItem?.name || 'Media Slide',
+      `${isSchemeGroup ? 'Scheme banner' : 'Hero banner'} order moved ${direction}`,
+      id
+    );
     onNotify(
       isSchemeGroup
         ? 'योजना कार्ड इमेज का क्रम बदल दिया गया!'
@@ -405,20 +494,30 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
 
   const handleSetSlideOrder = async (id: string, newOrder: number) => {
     if (isNaN(newOrder) || newOrder < 1) return;
+    const targetItem = mediaAssets.find((m) => m.id === id);
     setMediaAssets((prev) =>
       prev.map((m) => (m.id === id ? { ...m, order: newOrder } : m))
     );
     await mediaStorageService.updateMediaAsset(id, { order: newOrder });
+    logActivity('UPDATE', 'media', targetItem?.name || 'Media Banner', `Set slide position to #${newOrder}`, id);
     onNotify(`बैनर क्रम #${newOrder} पर सेट किया गया!`);
     loadMediaAndShowcase();
   };
 
   const handleToggleMediaActive = async (id: string, currentActive?: boolean) => {
     const newActive = currentActive === false;
+    const targetItem = mediaAssets.find((m) => m.id === id);
     setMediaAssets((prev) =>
       prev.map((m) => (m.id === id ? { ...m, active: newActive } : m))
     );
     await mediaStorageService.updateMediaAsset(id, { active: newActive });
+    logActivity(
+      'UPDATE',
+      'media',
+      targetItem?.name || 'Media Banner',
+      newActive ? 'Activated banner on live site' : 'Hidden banner from live site',
+      id
+    );
     onNotify(newActive ? 'बैनर हीरो स्लाइडर में सक्रिय (Active) किया गया!' : 'बैनर हीरो स्लाइडर से छिपाया गया (Hidden)!');
   };
 
@@ -461,12 +560,20 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
   };
 
   const handleDeleteUser = async (uid: string) => {
+    const targetUser = users.find((u) => u.uid === uid);
     await firestoreService.deleteUserData(uid);
     setUsers((prev) => prev.filter((u) => u.uid !== uid));
     if (selectedUserDetail?.uid === uid) {
       setSelectedUserDetail(null);
     }
     setConfirmActionKey(null);
+    logActivity(
+      'DELETE',
+      'users',
+      targetUser?.name || uid,
+      `Deleted citizen profile (${targetUser?.phone ? `+91 ${targetUser.phone}` : 'No phone'}, ${targetUser?.location || 'India'})`,
+      uid
+    );
     onNotify('नागरिक खाता सफलतापूर्वक हटा दिया गया।');
   };
 
@@ -484,7 +591,7 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
       pay: jobPay || '₹9,000 - ₹14,000 / month',
       path: 'digital',
       verified: true,
-      source: 'Super Administrator Direct Entry',
+      source: isSuperAdmin ? 'Super Administrator Direct Entry' : `Sub-Admin (${currentUser?.email || 'Portal'})`,
       lastVerifiedDate: 'October 2026',
       eligibility: jobEligibility || `${jobMinEdu} with basic technical training.`,
       documentsRequired: ['Aadhaar Card', 'Mark sheet', 'Bank Passbook'],
@@ -496,6 +603,13 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
     if (newJob.type === 'Training') {
       contentService.upsert('training_centers', newJob.id, newJob);
     }
+    logActivity(
+      'ADD',
+      'jobs',
+      newJob.title,
+      `Added ${newJob.type} at ${newJob.org} (${newJob.loc}) · ${newJob.pay}`,
+      newJob.id
+    );
 
     setShowAddJobModal(false);
     setJobTitle('');
@@ -535,6 +649,13 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
 
     setPathways((prev) => [newPath, ...prev]);
     contentService.upsert('pathways', newPath.id, newPath);
+    logActivity(
+      'ADD',
+      'pathways',
+      `${newPath.name} (${newPath.hi})`,
+      `Created NSQF Level ${newPath.nsqf} pathway · ${newPath.duration}`,
+      newPath.id
+    );
     setShowAddPathwayModal(false);
     setPathwayName('');
     setPathwayHi('');
@@ -543,14 +664,24 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
   };
 
   const handleDeleteJob = (id: string) => {
+    const targetJob = opportunities.find((o) => o.id === id);
     setOpportunities((prev) => prev.filter((o) => o.id !== id));
     contentService.remove('opportunities', id);
     contentService.remove('training_centers', id);
     setConfirmActionKey(null);
+    logActivity(
+      'DELETE',
+      'jobs',
+      targetJob?.title || id,
+      targetJob ? `Removed ${targetJob.type} (${targetJob.org}, ${targetJob.loc})` : 'Removed opportunity listing',
+      id
+    );
     onNotify('Opportunity removed from Firestore.');
   };
 
   const handleToggleVerify = (id: string) => {
+    const targetJob = opportunities.find((o) => o.id === id);
+    const nextVerified = targetJob ? !targetJob.verified : true;
     setOpportunities((prev) =>
       prev.map((o) => {
         if (o.id === id) {
@@ -560,6 +691,13 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
         }
         return o;
       })
+    );
+    logActivity(
+      'UPDATE',
+      'jobs',
+      targetJob?.title || id,
+      nextVerified ? 'Marked opportunity as Verified' : 'Marked opportunity as Unverified',
+      id
     );
     onNotify('Verification state updated in Firestore.');
   };
@@ -662,6 +800,7 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
           ctaUrl: mediaCtaUrl.trim() || undefined,
           ctaLabel: mediaCtaLabel.trim() || undefined,
         });
+        logActivity('UPDATE', 'media', mediaTitle.trim(), `Updated media asset in folder "${mediaFolder}"`, editingMediaId);
         const msg = 'मीडिया सफलतापूर्वक अपडेट किया गया!';
         onNotify(msg);
         setMediaStatusNotice({ type: 'success', text: msg });
@@ -705,6 +844,7 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
             active: true,
           });
         }
+        logActivity('ADD', 'media', mediaTitle.trim(), `Uploaded ${total} media file(s) to folder "${mediaFolder}"`);
         const msg = `सफलतापूर्वक ${total} तस्वीर(ें) Cloudinary पर अपलोड हो गईं और वेबसाइट पर लाइव हैं!`;
         onNotify(msg);
         setMediaStatusNotice({ type: 'success', text: msg });
@@ -742,6 +882,7 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
           order: maxOrder + 1,
           active: true,
         });
+        logActivity('ADD', 'media', mediaTitle.trim(), `Uploaded media asset to folder "${mediaFolder}"`);
         const msg = 'तस्वीर Cloudinary पर अपलोड हो गई और वेबसाइट पर लाइव कर दी गई!';
         onNotify(msg);
         setMediaStatusNotice({ type: 'success', text: msg });
@@ -761,8 +902,10 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
   };
 
   const handleDeleteMedia = async (id: string) => {
+    const targetMedia = mediaAssets.find((m) => m.id === id);
     await mediaStorageService.deleteMediaAsset(id);
     setConfirmActionKey(null);
+    logActivity('DELETE', 'media', targetMedia?.name || id, `Deleted media asset from folder "${targetMedia?.folder || 'gallery'}"`, id);
     onNotify('तस्वीर गैलरी से स्थायी रूप से हटा दी गई।');
     loadMediaAndShowcase();
   };
@@ -786,8 +929,16 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
   };
 
   const handleDeleteShowcase = async (id: string) => {
+    const targetProd = showcaseProducts.find((p) => p.id === id);
     await mediaStorageService.deleteShowcaseProduct(id);
     setConfirmActionKey(null);
+    logActivity(
+      'DELETE',
+      'showcase',
+      targetProd?.title || id,
+      targetProd ? `Removed showcase listing by ${targetProd.artisanName}` : 'Removed showcase product',
+      id
+    );
     onNotify('Product removed from showcase.');
     loadMediaAndShowcase();
   };
@@ -825,6 +976,14 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
           badge: '/icons/icon-192.svg',
         });
       }
+      logActivity(
+        'ADD',
+        'notifications',
+        notifTitle.trim(),
+        notifTarget === 'all'
+          ? `Broadcast sent to all ${users.length} citizens`
+          : `Notification sent to citizen ${notifTargetUserId}`
+      );
       onNotify(
         notifTarget === 'all'
           ? `सभी ${users.length} नागरिकों को पुश नोटिफिकेशन भेज दिया गया!`
@@ -837,6 +996,156 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
     }
   };
 
+  // Sub-Admin CRUD Handlers
+  const handleAddSubAdmin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSubAdminError('');
+    const cleanEmail = subAdminService.normalizeEmail(subAdminEmailInput);
+    if (!subAdminService.isValidEmail(cleanEmail)) {
+      setSubAdminError('कृपया सही Gmail / Email पता दर्ज करें (जैसे: name@gmail.com)।');
+      return;
+    }
+
+    setSubAdminSubmitting(true);
+    try {
+      const created = await subAdminService.addSubAdmin({
+        email: cleanEmail,
+        name: subAdminNameInput.trim(),
+        note: subAdminNoteInput.trim(),
+        addedBy: currentUser?.email || 'Super Admin',
+      });
+      logActivity(
+        'ADD',
+        'sub_admins',
+        `${created.name} (${created.email})`,
+        created.note ? `Added Sub-Admin · ${created.note}` : 'Granted Sub-Admin portal access',
+        created.email
+      );
+      setSubAdminEmailInput('');
+      setSubAdminNameInput('');
+      setSubAdminNoteInput('');
+      setSelectedSubAdminEmail(created.email);
+      setSubAdminRulesError(false);
+      onNotify(`सब-एडमिन ${created.email} सफलतापूर्वक जोड़ा गया! अब वे Google लॉगिन से प्रवेश कर सकते हैं।`);
+    } catch (err: any) {
+      const code = err?.code || '';
+      if (code === 'permission-denied') {
+        setSubAdminRulesError(true);
+        setSubAdminError('Firestore Rules अपडेट नहीं हैं। कृपया Firebase Console में नई firestore.rules पब्लिश करें।');
+      } else {
+        setSubAdminError(err?.message || 'सब-एडमिन जोड़ने में त्रुटि हुई।');
+      }
+    } finally {
+      setSubAdminSubmitting(false);
+    }
+  };
+
+  const handleToggleSubAdmin = async (sa: SubAdminRecord) => {
+    const nextActive = !sa.active;
+    try {
+      await subAdminService.toggleSubAdminStatus(sa.email, nextActive);
+      logActivity(
+        'UPDATE',
+        'sub_admins',
+        `${sa.name} (${sa.email})`,
+        nextActive ? 'Re-activated Sub-Admin access' : 'Paused Sub-Admin access',
+        sa.email
+      );
+      onNotify(
+        nextActive
+          ? `${sa.email} का सब-एडमिन एक्सेस पुनः चालू किया गया।`
+          : `${sa.email} का सब-एडमिन एक्सेस रोका गया (Paused)।`
+      );
+    } catch (err: any) {
+      onNotify(err?.message || 'स्टेटस बदलने में त्रुटि हुई।');
+    }
+  };
+
+  const handleRemoveSubAdmin = async (sa: SubAdminRecord) => {
+    try {
+      await subAdminService.removeSubAdmin(sa.email);
+      logActivity(
+        'DELETE',
+        'sub_admins',
+        `${sa.name} (${sa.email})`,
+        'Revoked and removed Sub-Admin account',
+        sa.email
+      );
+      if (selectedSubAdminEmail === sa.email) {
+        setSelectedSubAdminEmail(null);
+      }
+      setConfirmActionKey(null);
+      onNotify(`सब-एडमिन ${sa.email} को हटा दिया गया।`);
+    } catch (err: any) {
+      onNotify(err?.message || 'सब-एडमिन हटाने में त्रुटि हुई।');
+    }
+  };
+
+  const getActorActivityStats = (email: string) => {
+    const normalized = subAdminService.normalizeEmail(email);
+    let added = 0;
+    let updated = 0;
+    let deleted = 0;
+    activityLogs.forEach((log) => {
+      if (log.actorEmail === normalized) {
+        if (log.action === 'ADD') added += 1;
+        else if (log.action === 'UPDATE') updated += 1;
+        else if (log.action === 'DELETE') deleted += 1;
+      }
+    });
+    return { total: added + updated + deleted, added, updated, deleted };
+  };
+
+  const visibleActivityLogs = useMemo(() => {
+    const targetEmail = isSuperAdmin
+      ? selectedSubAdminEmail
+      : (currentUser?.email ? subAdminService.normalizeEmail(currentUser.email) : null);
+
+    return activityLogs.filter((log) => {
+      if (targetEmail && log.actorEmail !== subAdminService.normalizeEmail(targetEmail)) {
+        return false;
+      }
+      if (activityActionFilter !== 'ALL' && log.action !== activityActionFilter) {
+        return false;
+      }
+      return true;
+    });
+  }, [activityLogs, isSuperAdmin, selectedSubAdminEmail, currentUser?.email, activityActionFilter]);
+
+  const formatActivityTime = (iso: string) => {
+    try {
+      const d = new Date(iso);
+      const diffMin = Math.floor((Date.now() - d.getTime()) / 60000);
+      const formatted = d.toLocaleString('en-IN', {
+        day: '2-digit',
+        month: 'short',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+      if (diffMin < 1) return `अभी · ${formatted}`;
+      if (diffMin < 60) return `${diffMin} मिनट पहले · ${formatted}`;
+      const diffHr = Math.floor(diffMin / 60);
+      if (diffHr < 24) return `${diffHr} घंटे पहले · ${formatted}`;
+      const diffDays = Math.floor(diffHr / 24);
+      return `${diffDays} दिन पहले · ${formatted}`;
+    } catch {
+      return iso;
+    }
+  };
+
+  const getSectionLabel = (section: string) => {
+    const labels: Record<string, string> = {
+      jobs: 'रोजगार व अवसर (Jobs)',
+      pathways: 'NSQF पाठ्यक्रम (Pathways)',
+      media: 'मीडिया व बैनर (Media)',
+      users: 'नागरिक रजिस्ट्री (Users)',
+      showcase: 'लोकल शोकेस (Showcase)',
+      notifications: 'पुश ब्रॉडकास्ट (Alerts)',
+      sub_admins: 'सब-एडमिन प्रबंधन (Sub-Admins)',
+    };
+    return labels[section] || section;
+  };
+
   const navTabs = [
     { id: 'users', label: 'नागरिक व पंजीकरण', sub: 'User Registry', icon: 'users', badge: users.length },
     { id: 'overview', label: 'जिला विश्लेषण', sub: 'Overview & KPI', icon: 'trending' },
@@ -845,6 +1154,13 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
     { id: 'districts', label: 'जिला कवरेज', sub: 'District Nodes', icon: 'map', badge: dynamicDistrictIntelligence.length },
     { id: 'media', label: 'क्लाउडिनरी मीडिया', sub: 'बैनर व गैलरी', icon: 'sparkles', badge: mediaAssets.length },
     { id: 'notifications', label: 'पुश ब्रॉडकास्ट', sub: 'अलर्ट व रिमाइंडर', icon: 'bell' },
+    {
+      id: 'sub_admins',
+      label: isSuperAdmin ? 'सब-एडमिन (Sub-Admins)' : 'मेरी 7-दिन गतिविधि',
+      sub: isSuperAdmin ? 'Gmail Access & 7-Day Logs' : 'My 7-Day Activity Log',
+      icon: 'shieldCheck',
+      badge: isSuperAdmin ? subAdmins.length : activityLogs.length,
+    },
   ];
 
   if (!isAdmin) {
@@ -898,13 +1214,26 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
         <div className="space-y-1">
           <div className="inline-flex items-center gap-2 text-[11px] font-bold uppercase tracking-wider text-[#F4B966]">
             <Icon name="shieldCheck" size={14} />
-            <span>Super Administrator Console · लाइव प्रशासनिक केंद्र</span>
+            <span>
+              {isSuperAdmin
+                ? 'Super Administrator Console · लाइव प्रशासनिक केंद्र'
+                : 'Sub-Administrator Console · अधिकृत सब-एडमिन पैनल'}
+            </span>
           </div>
           <h1 className="text-xl sm:text-2xl md:text-3xl font-extrabold tracking-tight font-['Bricolage_Grotesque']">
             National Skill &amp; Livelihood Intelligence Platform
           </h1>
-          <p className="text-xs sm:text-sm text-white/80">
-            लॉगिन: <strong>{currentUser?.displayName || 'Super Admin'}</strong> ({currentUser?.email || 'Admin Portal'})
+          <p className="text-xs sm:text-sm text-white/80 flex flex-wrap items-center gap-2">
+            <span>
+              लॉगिन: <strong>{currentUser?.displayName || (isSuperAdmin ? 'Super Admin' : 'Sub-Admin')}</strong> ({currentUser?.email || 'Admin Portal'})
+            </span>
+            <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase ${
+              isSuperAdmin
+                ? 'bg-[#F4B966]/20 text-[#F4B966] border border-[#F4B966]/35'
+                : 'bg-[#287D73]/30 text-[#A7F3D0] border border-[#287D73]/50'
+            }`}>
+              {isSubAdmin ? 'Sub-Admin' : 'Super Admin'}
+            </span>
           </p>
         </div>
 
@@ -2397,6 +2726,408 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
                     <Icon name="bell" size={16} />
                     <span>{notifSending ? 'Broadcasting...' : 'Push Notification Broadcast'}</span>
                   </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* TAB 8: SUB-ADMINS MANAGEMENT & 7-DAY ACTIVITY LOGS */}
+          {activeTab === 'sub_admins' && (
+            <div className="space-y-5">
+              {subAdminRulesError && (
+                <div className="bg-[#FFF8EB] border border-[#D9822B]/40 rounded-2xl p-4 text-xs text-[#7C4A03] space-y-1.5">
+                  <div className="font-extrabold flex items-center gap-1.5 text-[#9A5B04]">
+                    <Icon name="info" size={15} />
+                    <span>Firebase Firestore Rules पब्लिश करना आवश्यक है (Rules Deployment Notice)</span>
+                  </div>
+                  <p className="leading-relaxed">
+                    सब-एडमिन और 7-दिन एक्टिविटी लॉग्स को लाइव Firestore में सेव करने के लिए कृपया अपने प्रोजेक्ट की अपडेटेड <code className="px-1.5 py-0.5 bg-white rounded border border-[#D9822B]/30 font-mono">firestore.rules</code> फाइल को Firebase Console → Firestore Database → Rules में पब्लिश करें।
+                  </p>
+                </div>
+              )}
+
+              {/* Super Admin: Add Sub-Admin by Gmail Card */}
+              {isSuperAdmin && (
+                <div className="bg-white border border-[#DCE3EA] rounded-2xl p-5 sm:p-6 space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-[#DCE3EA]">
+                    <div>
+                      <h2 className="text-base sm:text-lg font-extrabold text-[#17365D] flex items-center gap-2 font-['Bricolage_Grotesque']">
+                        <Icon name="shieldCheck" size={18} className="text-[#287D73]" />
+                        <span>नया सब-एडमिन जोड़ें (Add Sub-Admin by Gmail)</span>
+                      </h2>
+                      <p className="text-xs text-[#5F6B76] mt-0.5">
+                        यहाँ जोड़ा गया Gmail खाता Admin Login में <strong>Google से 1-क्लिक लॉगिन</strong> करके तुरंत एडमिन पैनल चला सकता है। उनकी हर Add/Edit/Delete गतिविधि 7 दिनों तक नीचे रिकॉर्ड होती है।
+                      </p>
+                    </div>
+                    <span className="px-2.5 py-1 rounded-lg bg-[#E9F4F2] text-[#287D73] border border-[#287D73]/25 text-[11px] font-bold self-start sm:self-center whitespace-nowrap">
+                      कुल सब-एडमिन: {subAdmins.length}
+                    </span>
+                  </div>
+
+                  {subAdminError && (
+                    <div className="p-3 rounded-xl bg-[#FDEDEC] text-[#9E2A2B] border border-[#9E2A2B]/20 text-xs font-semibold flex items-center gap-2">
+                      <Icon name="info" size={14} className="shrink-0" />
+                      <span>{subAdminError}</span>
+                    </div>
+                  )}
+
+                  <form onSubmit={handleAddSubAdmin} className="grid grid-cols-1 md:grid-cols-12 gap-3 text-xs">
+                    <div className="md:col-span-4">
+                      <label className="block font-bold text-[#17365D] mb-1">
+                        Sub-Admin Gmail ID *
+                      </label>
+                      <input
+                        type="email"
+                        required
+                        value={subAdminEmailInput}
+                        onChange={(e) => setSubAdminEmailInput(e.target.value)}
+                        placeholder="example@gmail.com"
+                        className="w-full min-h-[44px] px-3 py-2.5 rounded-xl border border-[#DCE3EA] focus:border-[#245A91] focus:outline-none text-[#17365D] font-medium"
+                      />
+                    </div>
+                    <div className="md:col-span-3">
+                      <label className="block font-bold text-[#17365D] mb-1">
+                        नाम (Name)
+                      </label>
+                      <input
+                        type="text"
+                        value={subAdminNameInput}
+                        onChange={(e) => setSubAdminNameInput(e.target.value)}
+                        placeholder="जैसे: राहुल वर्मा"
+                        className="w-full min-h-[44px] px-3 py-2.5 rounded-xl border border-[#DCE3EA] focus:border-[#245A91] focus:outline-none text-[#17365D]"
+                      />
+                    </div>
+                    <div className="md:col-span-3">
+                      <label className="block font-bold text-[#17365D] mb-1">
+                        जिम्मेदारी / जिला (Note)
+                      </label>
+                      <input
+                        type="text"
+                        value={subAdminNoteInput}
+                        onChange={(e) => setSubAdminNoteInput(e.target.value)}
+                        placeholder="जैसे: गोरखपुर Jobs & Media"
+                        className="w-full min-h-[44px] px-3 py-2.5 rounded-xl border border-[#DCE3EA] focus:border-[#245A91] focus:outline-none text-[#17365D]"
+                      />
+                    </div>
+                    <div className="md:col-span-2 flex items-end">
+                      <button
+                        type="submit"
+                        disabled={subAdminSubmitting}
+                        className="w-full min-h-[44px] px-4 py-2.5 rounded-xl bg-[#287D73] hover:bg-[#1E6058] text-white font-bold flex items-center justify-center gap-1.5 transition-colors disabled:opacity-50"
+                      >
+                        <Icon name="plus" size={14} />
+                        <span>{subAdminSubmitting ? 'जोड़ रहे...' : 'जोड़ें'}</span>
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              )}
+
+              {/* Main Split Grid: Sub-Admins List (Left) + Last 7 Days Activity Inspector (Right) */}
+              <div className={`grid grid-cols-1 ${isSuperAdmin ? 'lg:grid-cols-12' : ''} gap-5 items-start`}>
+                {isSuperAdmin && (
+                  <div className="lg:col-span-5 bg-white border border-[#DCE3EA] rounded-2xl p-4 sm:p-5 space-y-3">
+                    <div className="flex items-center justify-between pb-2.5 border-b border-[#DCE3EA]">
+                      <div>
+                        <h3 className="text-sm font-extrabold text-[#17365D]">
+                          जोड़े गए सब-एडमिन ({subAdmins.length})
+                        </h3>
+                        <p className="text-[11px] text-[#5F6B76]">
+                          किसी भी सब-एडमिन पर टैप करें और उनकी 7 दिन की गतिविधि देखें
+                        </p>
+                      </div>
+                      {selectedSubAdminEmail && (
+                        <button
+                          type="button"
+                          onClick={() => setSelectedSubAdminEmail(null)}
+                          className="text-[11px] font-bold text-[#245A91] hover:underline"
+                        >
+                          सभी देखें
+                        </button>
+                      )}
+                    </div>
+
+                    {subAdmins.length === 0 ? (
+                      <div className="py-10 px-4 text-center bg-[#F7F9FC] rounded-xl border border-dashed border-[#DCE3EA] space-y-2">
+                        <div className="w-11 h-11 rounded-xl bg-white border border-[#DCE3EA] text-[#245A91] mx-auto flex items-center justify-center">
+                          <Icon name="users" size={20} />
+                        </div>
+                        <div className="text-xs font-bold text-[#17365D]">अभी कोई सब-एडमिन नहीं जोड़ा गया है</div>
+                        <p className="text-[11px] text-[#5F6B76]">
+                          ऊपर Gmail पता डालकर पहला सब-एडमिन जोड़ें। जुड़ते ही वे यहाँ लिस्ट में दिखाई देंगे।
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="space-y-2.5">
+                        {subAdmins.map((sa) => {
+                          const stats = getActorActivityStats(sa.email);
+                          const isSelected = selectedSubAdminEmail === sa.email;
+                          return (
+                            <div
+                              key={sa.email}
+                              role="button"
+                              tabIndex={0}
+                              onClick={() => {
+                                setSelectedSubAdminEmail(sa.email);
+                                setActivityActionFilter('ALL');
+                                if (typeof window !== 'undefined' && window.innerWidth < 1024) {
+                                  setTimeout(() => {
+                                    activityPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                                  }, 80);
+                                }
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                  e.preventDefault();
+                                  setSelectedSubAdminEmail(sa.email);
+                                }
+                              }}
+                              className={`p-3.5 rounded-xl border transition-all cursor-pointer space-y-2.5 ${
+                                isSelected
+                                  ? 'bg-[#EEF5FC] border-[#245A91] ring-1 ring-[#245A91]'
+                                  : 'bg-[#F7F9FC] border-[#DCE3EA] hover:border-[#245A91]/60 hover:bg-white'
+                              }`}
+                            >
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="flex items-center gap-2.5 min-w-0">
+                                  <div className={`w-9 h-9 rounded-xl font-extrabold text-xs flex items-center justify-center shrink-0 ${
+                                    sa.active
+                                      ? 'bg-[#17365D] text-white'
+                                      : 'bg-slate-200 text-slate-600'
+                                  }`}>
+                                    {(sa.name || sa.email).slice(0, 2).toUpperCase()}
+                                  </div>
+                                  <div className="min-w-0">
+                                    <div className="text-xs font-extrabold text-[#17365D] truncate flex items-center gap-1.5">
+                                      <span className="truncate">{sa.name || sa.email.split('@')[0]}</span>
+                                      <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase shrink-0 ${
+                                        sa.active
+                                          ? 'bg-[#E9F4F2] text-[#287D73] border border-[#287D73]/25'
+                                          : 'bg-slate-200 text-slate-600'
+                                      }`}>
+                                        {sa.active ? 'Active' : 'Paused'}
+                                      </span>
+                                    </div>
+                                    <div className="text-[11px] font-mono text-[#245A91] truncate">{sa.email}</div>
+                                    {sa.note && (
+                                      <div className="text-[10px] text-[#5F6B76] truncate mt-0.5">{sa.note}</div>
+                                    )}
+                                  </div>
+                                </div>
+                                <span className="text-[10px] font-bold text-[#245A91] shrink-0">
+                                  {isSelected ? 'चयनित ✓' : 'लॉग देखें →'}
+                                </span>
+                              </div>
+
+                              {/* 7-Day Activity Summary Strip */}
+                              <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[#DCE3EA]/80 text-[10px]">
+                                <div className="flex items-center gap-1.5 tabular-nums font-bold">
+                                  <span className="px-2 py-0.5 rounded bg-[#E9F4F2] text-[#287D73]">
+                                    +{stats.added} जोड़ा
+                                  </span>
+                                  <span className="px-2 py-0.5 rounded bg-[#EEF5FC] text-[#245A91]">
+                                    ✎{stats.updated} बदला
+                                  </span>
+                                  <span className="px-2 py-0.5 rounded bg-[#FDEDEC] text-[#9E2A2B]">
+                                    ✕{stats.deleted} हटाया
+                                  </span>
+                                </div>
+
+                                <div
+                                  className="flex items-center gap-1.5"
+                                  onClick={(e) => e.stopPropagation()}
+                                >
+                                  <button
+                                    type="button"
+                                    onClick={() => handleToggleSubAdmin(sa)}
+                                    className="px-2 py-1 rounded-lg border border-[#DCE3EA] bg-white hover:bg-slate-50 text-[#17365D] font-bold text-[10px]"
+                                  >
+                                    {sa.active ? 'रोकें' : 'चालू करें'}
+                                  </button>
+                                  {confirmActionKey === `remove-sa:${sa.email}` ? (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleRemoveSubAdmin(sa)}
+                                        className="px-2 py-1 rounded-lg bg-[#9E2A2B] text-white font-bold text-[10px]"
+                                      >
+                                        हटाएं
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setConfirmActionKey(null)}
+                                        className="px-2 py-1 rounded-lg border border-[#DCE3EA] bg-white text-[#5F6B76] font-bold text-[10px]"
+                                      >
+                                        रद्द
+                                      </button>
+                                    </>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      onClick={() => setConfirmActionKey(`remove-sa:${sa.email}`)}
+                                      className="px-2 py-1 rounded-lg bg-red-50 hover:bg-red-100 text-[#9E2A2B] border border-red-200 font-bold text-[10px]"
+                                    >
+                                      हटाएं
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+
+                              <div className="flex items-center justify-between text-[10px] text-[#5F6B76]">
+                                <span>जोड़ा गया: {new Date(sa.addedAt).toLocaleDateString('en-IN')}</span>
+                                <span>
+                                  {sa.lastLoginAt
+                                    ? `अंतिम लॉगिन: ${new Date(sa.lastLoginAt).toLocaleDateString('en-IN')}`
+                                    : 'अभी तक लॉगिन नहीं किया'}
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Right Column: Last 7 Days Activity Audit Trail */}
+                <div
+                  ref={activityPanelRef}
+                  className={`${isSuperAdmin ? 'lg:col-span-7' : 'w-full'} bg-white border border-[#DCE3EA] rounded-2xl p-4 sm:p-5 space-y-4`}
+                >
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-[#DCE3EA]">
+                    <div>
+                      <div className="text-[11px] font-bold uppercase tracking-wider text-[#287D73]">
+                        Last 7 Days Audit Trail · पिछले 7 दिनों की गतिविधि
+                      </div>
+                      <h3 className="text-base font-extrabold text-[#17365D] mt-0.5">
+                        {isSuperAdmin
+                          ? selectedSubAdminEmail
+                            ? `${subAdmins.find((s) => s.email === selectedSubAdminEmail)?.name || selectedSubAdminEmail}`
+                            : 'सभी एडमिन और सब-एडमिन गतिविधि (All Activity)'
+                          : `मेरी गतिविधि (${currentUser?.email})`}
+                      </h3>
+                      {isSuperAdmin && selectedSubAdminEmail && (
+                        <p className="text-[11px] font-mono text-[#245A91]">{selectedSubAdminEmail}</p>
+                      )}
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                      {(['ALL', 'ADD', 'UPDATE', 'DELETE'] as const).map((act) => {
+                        const labels = {
+                          ALL: 'सभी (All)',
+                          ADD: '+ जोड़ा (Added)',
+                          UPDATE: '✎ बदला (Updated)',
+                          DELETE: '✕ हटाया (Deleted)',
+                        };
+                        return (
+                          <button
+                            key={act}
+                            type="button"
+                            onClick={() => setActivityActionFilter(act)}
+                            className={`px-2.5 py-1.5 rounded-lg font-bold border transition-colors ${
+                              activityActionFilter === act
+                                ? 'bg-[#17365D] text-white border-[#17365D]'
+                                : 'bg-[#F7F9FC] text-[#5F6B76] border-[#DCE3EA] hover:text-[#17365D]'
+                            }`}
+                          >
+                            {labels[act]}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Summary Strip */}
+                  <div className="grid grid-cols-3 gap-2.5 text-center">
+                    <div className="p-2.5 rounded-xl bg-[#E9F4F2] border border-[#287D73]/25">
+                      <div className="text-lg font-extrabold text-[#287D73] tabular-nums">
+                        {visibleActivityLogs.filter((l) => l.action === 'ADD').length}
+                      </div>
+                      <div className="text-[10px] font-bold text-[#17365D]">जोड़ा (Added)</div>
+                    </div>
+                    <div className="p-2.5 rounded-xl bg-[#EEF5FC] border border-[#245A91]/25">
+                      <div className="text-lg font-extrabold text-[#245A91] tabular-nums">
+                        {visibleActivityLogs.filter((l) => l.action === 'UPDATE').length}
+                      </div>
+                      <div className="text-[10px] font-bold text-[#17365D]">बदला (Updated)</div>
+                    </div>
+                    <div className="p-2.5 rounded-xl bg-[#FDEDEC] border border-[#9E2A2B]/25">
+                      <div className="text-lg font-extrabold text-[#9E2A2B] tabular-nums">
+                        {visibleActivityLogs.filter((l) => l.action === 'DELETE').length}
+                      </div>
+                      <div className="text-[10px] font-bold text-[#17365D]">हटाया (Deleted)</div>
+                    </div>
+                  </div>
+
+                  {/* Chronological 7-Day Activity Feed */}
+                  {visibleActivityLogs.length === 0 ? (
+                    <div className="py-12 px-4 text-center bg-[#F7F9FC] rounded-xl border border-dashed border-[#DCE3EA] space-y-1.5">
+                      <div className="text-xs font-bold text-[#17365D]">
+                        पिछले 7 दिनों में कोई रिकॉर्ड की गई गतिविधि नहीं मिली
+                      </div>
+                      <p className="text-[11px] text-[#5F6B76]">
+                        जब भी यह खाता कोई नौकरी, पाठ्यक्रम, बैनर, या नागरिक रिकॉर्ड जोड़ेगा, बदलेगा या हटाएगा — वह तुरंत यहाँ तारीख और समय के साथ दिखेगा।
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-2.5 max-h-[540px] overflow-y-auto pr-1">
+                      {visibleActivityLogs.map((log) => {
+                        const badgeClass =
+                          log.action === 'ADD'
+                            ? 'bg-[#E9F4F2] text-[#287D73] border-[#287D73]/30'
+                            : log.action === 'DELETE'
+                            ? 'bg-[#FDEDEC] text-[#9E2A2B] border-[#9E2A2B]/30'
+                            : 'bg-[#EEF5FC] text-[#245A91] border-[#245A91]/30';
+
+                        const actionText =
+                          log.action === 'ADD'
+                            ? 'जोड़ा (ADDED)'
+                            : log.action === 'DELETE'
+                            ? 'हटाया (DELETED)'
+                            : 'बदला (UPDATED)';
+
+                        return (
+                          <div
+                            key={log.id}
+                            className="p-3.5 rounded-xl bg-[#F7F9FC] border border-[#DCE3EA] space-y-1.5"
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span className={`px-2 py-0.5 rounded-md text-[10px] font-extrabold border ${badgeClass}`}>
+                                  {actionText}
+                                </span>
+                                <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-white border border-[#DCE3EA] text-[#17365D]">
+                                  {getSectionLabel(log.section)}
+                                </span>
+                              </div>
+                              <span className="text-[10px] font-semibold text-[#5F6B76] tabular-nums">
+                                {formatActivityTime(log.createdAt)}
+                              </span>
+                            </div>
+
+                            <div className="text-xs font-extrabold text-[#17365D]">
+                              {log.targetTitle}
+                            </div>
+
+                            {log.details && (
+                              <div className="text-[11px] text-[#5F6B76] leading-relaxed">
+                                {log.details}
+                              </div>
+                            )}
+
+                            <div className="text-[10px] text-[#5F6B76] flex items-center justify-between pt-1 border-t border-[#DCE3EA]/60">
+                              <span>
+                                द्वारा: <strong className="text-[#17365D]">{log.actorName}</strong> ({log.actorEmail})
+                              </span>
+                              <span className="uppercase font-bold text-[9px] text-[#245A91]">
+                                {log.actorRole === 'admin' ? 'Super Admin' : 'Sub-Admin'}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

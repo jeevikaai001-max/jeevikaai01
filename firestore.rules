@@ -1,62 +1,164 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Super Administrator helper rule.
-    // The email must be verified (Google sign-in always is) so nobody can claim the admin
-    // address by registering it first with an email/password account.
-    function isAdmin() {
-      return request.auth != null && (
-        request.auth.token.email_verified == true ||
-        request.auth.token.role == 'admin'
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isVerifiedEmail() {
+      return isAuthenticated() &&
+        request.auth.token.email is string &&
+        request.auth.token.email_verified == true;
+    }
+
+    // Super Administrator accounts (verified Google email required)
+    function isSuperAdmin() {
+      return isVerifiedEmail() && (
+        request.auth.token.email.lower() in [
+          'ayushgupt640@gmail.com',
+          'admin@jeevikaai.org',
+          'admin@jeevika.gov.in',
+          'support@jeevikaai.org'
+        ]
       );
     }
 
-    // User profile documents: Beneficiaries can create, update, and read their profile
+    // Active Sub-Administrator registered by a Super Admin in /sub_admins/{email}
+    function isSubAdmin() {
+      return isVerifiedEmail() &&
+        exists(/databases/$(database)/documents/sub_admins/$(request.auth.token.email.lower())) &&
+        get(/databases/$(database)/documents/sub_admins/$(request.auth.token.email.lower())).data.active == true;
+    }
+
+    function isAnyAdmin() {
+      return isSuperAdmin() || isSubAdmin();
+    }
+
+    function isValidEmailKey(emailKey) {
+      return emailKey is string &&
+        emailKey.size() >= 5 &&
+        emailKey.size() <= 150 &&
+        emailKey.matches('^[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}$');
+    }
+
+    function isValidSubAdmin(data, emailKey) {
+      return isValidEmailKey(emailKey) &&
+        data.keys().hasAll(['email', 'active', 'addedBy', 'addedAt']) &&
+        data.keys().hasOnly(['email', 'name', 'note', 'active', 'addedBy', 'addedAt', 'lastLoginAt', 'updatedAt']) &&
+        data.email is string && data.email.lower() == emailKey &&
+        data.active is bool &&
+        data.addedBy is string && data.addedBy.size() > 0 && data.addedBy.size() <= 150 &&
+        data.addedAt is string && data.addedAt.size() > 0 && data.addedAt.size() <= 64 &&
+        (!('name' in data) || (data.name is string && data.name.size() <= 120)) &&
+        (!('note' in data) || (data.note is string && data.note.size() <= 200)) &&
+        (!('lastLoginAt' in data) || (data.lastLoginAt is string && data.lastLoginAt.size() <= 64)) &&
+        (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 64));
+    }
+
+    function isValidActivityLog(data) {
+      return data.keys().hasAll(['actorEmail', 'actorRole', 'action', 'section', 'targetTitle', 'createdAt', 'timestampMs']) &&
+        data.keys().hasOnly(['id', 'actorEmail', 'actorName', 'actorRole', 'action', 'section', 'targetTitle', 'targetId', 'details', 'createdAt', 'timestampMs']) &&
+        data.actorEmail is string && data.actorEmail.size() >= 5 && data.actorEmail.size() <= 150 &&
+        data.actorRole in ['admin', 'sub_admin'] &&
+        data.action in ['ADD', 'UPDATE', 'DELETE'] &&
+        data.section is string && data.section.size() > 0 && data.section.size() <= 64 &&
+        data.targetTitle is string && data.targetTitle.size() > 0 && data.targetTitle.size() <= 240 &&
+        data.createdAt is string && data.createdAt.size() > 0 && data.createdAt.size() <= 64 &&
+        data.timestampMs is number && data.timestampMs > 0 &&
+        (!('id' in data) || (data.id is string && data.id.size() <= 128)) &&
+        (!('actorName' in data) || (data.actorName is string && data.actorName.size() <= 120)) &&
+        (!('targetId' in data) || (data.targetId is string && data.targetId.size() <= 128)) &&
+        (!('details' in data) || (data.details is string && data.details.size() <= 500));
+    }
+
+    // ===============================================================
+    // Sub-Admins RBAC Registry (Super Admin managed)
+    // ===============================================================
+    match /sub_admins/{emailKey} {
+      // Super Admin can read any sub-admin; a signed-in user can check ONLY their own email doc
+      allow get: if isSuperAdmin() || (isVerifiedEmail() && request.auth.token.email.lower() == emailKey);
+      allow list: if isSuperAdmin();
+
+      // Only Super Admin can create or remove sub-admins
+      allow create: if isSuperAdmin() && isValidSubAdmin(request.resource.data, emailKey);
+      allow delete: if isSuperAdmin();
+
+      // Super Admin can update any field; an active Sub-Admin can only stamp their own lastLoginAt
+      allow update: if (isSuperAdmin() && isValidSubAdmin(request.resource.data, emailKey)) || (
+        isVerifiedEmail() &&
+        request.auth.token.email.lower() == emailKey &&
+        resource.data.active == true &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastLoginAt', 'updatedAt']) &&
+        request.resource.data.email == resource.data.email &&
+        request.resource.data.active == resource.data.active &&
+        request.resource.data.addedBy == resource.data.addedBy &&
+        request.resource.data.addedAt == resource.data.addedAt
+      );
+    }
+
+    // ===============================================================
+    // Immutable Admin & Sub-Admin 7-Day Activity Audit Logs
+    // ===============================================================
+    match /admin_activity_logs/{logId} {
+      // Super Admin views all logs; Sub-Admins can only view their own activity logs
+      allow get, list: if isSuperAdmin() || (isSubAdmin() && resource.data.actorEmail == request.auth.token.email.lower());
+
+      // Any authorized Admin/Sub-Admin can append a log strictly under their own verified email
+      allow create: if isAnyAdmin() &&
+        isValidActivityLog(request.resource.data) &&
+        request.resource.data.actorEmail.lower() == request.auth.token.email.lower() &&
+        (
+          (isSuperAdmin() && request.resource.data.actorRole == 'admin') ||
+          (!isSuperAdmin() && isSubAdmin() && request.resource.data.actorRole == 'sub_admin')
+        );
+
+      // Logs are immutable so Sub-Admins cannot tamper with audit history
+      allow update: if false;
+      allow delete: if isSuperAdmin();
+    }
+
+    // ===============================================================
+    // Platform Collections (Beneficiaries & Public Livelihood Content)
+    // ===============================================================
     match /users/{userId} {
       allow read, write, create, update, delete: if true;
     }
 
-    // Assessment submissions and user skill analytics
     match /assessments/{assessmentId} {
       allow read, write, create, delete: if true;
     }
 
-    // Cloudinary Media Studio remote assets & Hero Banners
     match /media/{mediaId} {
       allow read, write, create, update, delete: if true;
     }
 
-    // Local Business Showcase products & rural handicrafts
     match /showcase/{productId} {
       allow read, write, create, update, delete: if true;
     }
 
-    // Public Opportunities and Job Directory
     match /opportunities/{opportunityId} {
       allow read, write, create, update, delete: if true;
     }
 
-    // NSQF Skill Pathways
     match /pathways/{pathwayId} {
       allow read, write, create, update, delete: if true;
     }
 
-    // Training Centers and PMKVY / RSETI Providers
     match /training_centers/{centerId} {
       allow read, write, create, update, delete: if true;
     }
 
-    // Government Schemes & Grant Cards
     match /schemes/{schemeId} {
       allow read, write, create, update, delete: if true;
     }
 
-    // System Statistics & Location Intelligence
     match /analytics/{docId} {
       allow read, write: if true;
     }
 
-    // Connectivity health probe
     match /test/{docId} {
       allow read: if true;
     }

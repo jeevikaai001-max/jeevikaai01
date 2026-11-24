@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { authService, AppUser, isAdminUser } from '../services/firebase';
+import { authService, AppUser, isAdminUser, isSuperAdminUser } from '../services/firebase';
 import { Icon } from './Icons';
 
 interface AdminLoginModalProps {
@@ -29,11 +29,17 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
       const user = await authService.loginWithGoogle();
       if (!isAdminUser(user)) {
         await authService.logout();
-        setError('इस Google खाते के पास प्रशासनिक अनुमति नहीं है। (Access Denied: Not an authorized admin account)');
+        setError(
+          'इस Gmail खाते को एडमिन या सब-एडमिन की अनुमति नहीं है। कृपया सुपर एडमिन से अपना Gmail जुड़वाएं। (Access Denied: Gmail not registered as Admin or Sub-Admin)'
+        );
         return;
       }
       onSuccess(user);
-      onNotify('प्रशासक के रूप में लॉगिन सफल! (Admin Authentication Successful)');
+      onNotify(
+        isSuperAdminUser(user)
+          ? 'सुपर एडमिन के रूप में लॉगिन सफल! (Super Admin Login Successful)'
+          : 'सब-एडमिन के रूप में लॉगिन सफल! (Sub-Admin Login Successful)'
+      );
       onClose();
     } catch (err: any) {
       setError(err.message || 'Google लॉगिन विफल रहा।');
@@ -53,13 +59,18 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
 
       const isAdmin = isAdminUser(user);
       if (!isAdmin) {
+        await authService.logout();
         setError('इस खाते के पास प्रशासनिक अनुमति नहीं है। (Access Denied: Not an authorized admin account)');
         setLoading(false);
         return;
       }
 
       onSuccess(user);
-      onNotify('प्रशासक के रूप में लॉगिन सफल! (Admin Authentication Successful)');
+      onNotify(
+        isSuperAdminUser(user)
+          ? 'सुपर एडमिन के रूप में लॉगिन सफल!'
+          : 'सब-एडमिन के रूप में लॉगिन सफल!'
+      );
       onClose();
     } catch (err: any) {
       setError(err.message || 'लॉगिन विफल रहा। कृपया सही ईमेल और पासवर्ड दर्ज करें।');
@@ -83,10 +94,10 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
             </div>
             <div>
               <h3 id="admin-dialog-title" className="text-base font-extrabold text-[#17365D]">
-                प्रशासनिक लॉगिन (Admin Portal)
+                प्रशासनिक लॉगिन (Admin &amp; Sub-Admin)
               </h3>
               <p className="text-[11px] text-[#5F6B76]">
-                Restricted Access · Authorized Personnel Only
+                Super Admin &amp; Authorized Sub-Admin Gmail Access
               </p>
             </div>
           </div>
@@ -103,7 +114,7 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
         <div className="p-2.5 rounded-xl bg-[#F7F9FC] border border-[#DCE3EA] text-[11px] text-[#5F6B76] flex items-start gap-2">
           <Icon name="lock" size={14} className="text-[#245A91] flex-none mt-0.5" />
           <span>
-            केवल अधिकृत प्रशासक ही इस पोर्टल पर डेटा और सेटिंग्स में बदलाव कर सकते हैं।
+            सुपर एडमिन और जोड़े गए सब-एडमिन अपने अधिकृत <strong>Gmail</strong> से नीचे 1-क्लिक Google लॉगिन करें।
           </span>
         </div>
 
@@ -121,7 +132,7 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
           className="w-full min-h-[46px] py-3 px-4 rounded-xl border border-[#245A91] bg-white hover:bg-[#F7F9FC] text-[#17365D] font-extrabold text-xs sm:text-sm flex items-center justify-center gap-2.5 transition-colors disabled:opacity-50"
         >
           <span className="w-6 h-6 rounded-full bg-[#245A91] text-white text-xs font-black flex items-center justify-center">G</span>
-          <span>Google से 1-क्लिक लॉगिन (Recommended)</span>
+          <span>Google (Gmail) से 1-क्लिक लॉगिन</span>
         </button>
 
         <div className="flex items-center gap-2 text-[11px] text-[#5F6B76]">
