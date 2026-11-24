@@ -9,7 +9,7 @@ import { speechService } from '../services/speechService';
 import { POPULAR_INDIAN_REGIONS, locationIntelligenceService } from '../services/locationIntelligenceService';
 
 interface OpportunitiesViewProps {
-  onShortlistToggle: (id: string) => void;
+  onShortlistToggle: (id: string, item?: Opportunity) => void;
   shortlist: Record<string, boolean>;
   onSelectDetail: (opp: Opportunity) => void;
   go: (route: string) => void;
@@ -508,7 +508,7 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
 
                 <button
                   type="button"
-                  onClick={() => onShortlistToggle(job.id)}
+                  onClick={() => onShortlistToggle(job.id, job)}
                   className={`min-h-[42px] px-3 py-2 rounded-xl text-xs font-bold border transition-colors flex items-center gap-1 ${
                     isSaved
                       ? 'bg-[#FFF4DB] text-[#B8691A] border-[#EBCB7A]'

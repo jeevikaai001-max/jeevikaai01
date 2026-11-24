@@ -118,18 +118,18 @@ const env = (import.meta.env || {}) as Record<string, string | undefined>;
 
 // Web API keys are public identifiers for Firebase; access is controlled by Auth + firestore.rules.
 const firebaseConfig = {
-  apiKey: env.VITE_FIREBASE_API_KEY || (appletConfig?.apiKey || ''),
-  authDomain: env.VITE_FIREBASE_AUTH_DOMAIN || (appletConfig?.authDomain || 'linear-ellipse-455407-b3.firebaseapp.com'),
-  projectId: env.VITE_FIREBASE_PROJECT_ID || (appletConfig?.projectId || 'linear-ellipse-455407-b3'),
-  storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET || (appletConfig?.storageBucket || 'linear-ellipse-455407-b3.firebasestorage.app'),
-  messagingSenderId: env.VITE_FIREBASE_MESSAGING_SENDER_ID || (appletConfig?.messagingSenderId || '599888155980'),
-  appId: env.VITE_FIREBASE_APP_ID || (appletConfig?.appId || '1:599888155980:web:8a879438d1ad2cf1586be9')
+  apiKey: env.VITE_FIREBASE_API_KEY || appletConfig?.apiKey || '',
+  authDomain: env.VITE_FIREBASE_AUTH_DOMAIN || appletConfig?.authDomain || '',
+  projectId: env.VITE_FIREBASE_PROJECT_ID || appletConfig?.projectId || '',
+  storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET || appletConfig?.storageBucket || '',
+  messagingSenderId: env.VITE_FIREBASE_MESSAGING_SENDER_ID || appletConfig?.messagingSenderId || '',
+  appId: env.VITE_FIREBASE_APP_ID || appletConfig?.appId || ''
 };
 
 // The Firestore database provisioned for this project is a *named* database
 // (see firebase-applet-config.json). getFirestore(app) alone would point at "(default)".
 const FIRESTORE_DATABASE_ID =
-  env.VITE_FIRESTORE_DATABASE_ID || 'ai-studio-e27aa460-fbb8-4c34-baae-a64c76d70446';
+  env.VITE_FIRESTORE_DATABASE_ID || appletConfig?.firestoreDatabaseId || '';
 
 export const isRealFirebaseConfigured = true;
 

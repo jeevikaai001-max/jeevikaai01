@@ -8,7 +8,7 @@ import { speechService } from '../services/speechService';
 import { POPULAR_INDIAN_REGIONS, locationIntelligenceService } from '../services/locationIntelligenceService';
 
 interface TrainingViewProps {
-  onShortlistToggle: (id: string) => void;
+  onShortlistToggle: (id: string, item?: Opportunity) => void;
   shortlist: Record<string, boolean>;
   onSelectDetail: (opp: Opportunity) => void;
   go: (route: string) => void;
@@ -154,6 +154,7 @@ export const TrainingView: React.FC<TrainingViewProps> = ({
           seenKeys.add(item.id);
           list.push({
             ...item,
+            type: 'Training',
             km: typeof item.km === 'number' ? item.km : 6,
             isLiveFirestore: false,
             fromLocationData: true,
@@ -167,7 +168,7 @@ export const TrainingView: React.FC<TrainingViewProps> = ({
       if (!seenKeys.has(key) && !seenKeys.has(item.id)) {
         seenKeys.add(key);
         seenKeys.add(item.id);
-        list.push({ ...item, isLiveFirestore: true, fromLocationData: false });
+        list.push({ ...item, type: 'Training', isLiveFirestore: true, fromLocationData: false });
       }
     });
 
@@ -176,7 +177,7 @@ export const TrainingView: React.FC<TrainingViewProps> = ({
       if (!seenKeys.has(key) && !seenKeys.has(item.id)) {
         seenKeys.add(key);
         seenKeys.add(item.id);
-        list.push({ ...item, isLiveFirestore: false, fromLocationData: false });
+        list.push({ ...item, type: 'Training', isLiveFirestore: false, fromLocationData: false });
       }
     });
 
@@ -535,7 +536,7 @@ export const TrainingView: React.FC<TrainingViewProps> = ({
                 </button>
 
                 <button
-                  onClick={() => onShortlistToggle(item.id)}
+                  onClick={() => onShortlistToggle(item.id, { ...item, type: 'Training' })}
                   className={`px-3.5 py-2 rounded-xl text-xs font-bold border transition-colors flex items-center gap-1.5 min-h-[44px] ${
                     isBookmarked
                       ? 'bg-[#17365D] text-white border-[#17365D]'

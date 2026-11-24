@@ -7,7 +7,7 @@ import { speechService } from '../services/speechService';
 interface OpportunityDetailModalProps {
   opp: Opportunity | null;
   onClose: () => void;
-  onShortlistToggle: (id: string) => void;
+  onShortlistToggle: (id: string, item?: Opportunity) => void;
   isShortlisted: boolean;
   activeLocation?: string;
   locationData?: LocationLivelihoodData | null;
@@ -275,7 +275,7 @@ export const OpportunityDetailModal: React.FC<OpportunityDetailModalProps> = ({
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => onShortlistToggle(opp.id)}
+              onClick={() => onShortlistToggle(opp.id, opp)}
               className={`min-h-[42px] px-3.5 py-2 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition-colors ${
                 isShortlisted
                   ? 'bg-[#FFF4DB] border-[#EBCB7A] text-[#B8691A]'

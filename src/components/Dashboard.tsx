@@ -47,7 +47,7 @@ interface DashboardProps {
   onRefreshLocationAi?: () => void;
   isRefreshingLocationData?: boolean;
   shortlist?: Record<string, boolean>;
-  onShortlistToggle?: (id: string) => void;
+  onShortlistToggle?: (id: string, item?: Opportunity) => void;
   currentUser?: AppUser | null;
   onOpenAccount?: (mode: 'create' | 'login') => void;
 }
@@ -239,9 +239,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
     }
   };
 
-  const toggleShortlist = (id: string) => {
+  const toggleShortlist = (id: string, item?: Opportunity) => {
     if (onShortlistToggle) {
-      onShortlistToggle(id);
+      onShortlistToggle(id, item);
       return;
     }
     const updated = { ...localShortlist, [id]: !localShortlist[id] };
@@ -994,7 +994,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                                   {dt('details', L)}
                                 </button>
                                 <button
-                                  onClick={() => toggleShortlist(job.id)}
+                                  onClick={() => toggleShortlist(job.id, job)}
                                   aria-pressed={saved}
                                   className={`min-h-10 px-3 rounded-lg text-xs font-bold flex items-center gap-1 transition-colors ${
                                     saved
@@ -1071,7 +1071,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                             {dt('details', L)}
                           </button>
                           <button
-                            onClick={() => toggleShortlist(job.id)}
+                            onClick={() => toggleShortlist(job.id, job)}
                             aria-pressed={saved}
                             className={`min-h-11 rounded-lg text-xs font-bold flex items-center justify-center gap-1 ${
                               saved ? 'bg-[#FFF4DB] text-[#B8691A] border border-[#EBCB7A]' : 'bg-white border border-[#DCE3EA] text-[#5F6B76]'
@@ -1110,23 +1110,40 @@ export const Dashboard: React.FC<DashboardProps> = ({
               <p className="text-sm text-[#5F6B76]">{dt('noCenters', L)}</p>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3 sm:gap-4">
-                {centers.slice(0, 3).map((c) => (
-                  <article key={c.id} className="p-4 rounded-xl border border-[#DCE3EA] bg-white flex flex-col gap-2">
-                    <h3 className="text-base font-extrabold text-[#17365D] leading-snug">{c.title}</h3>
-                    <div className="text-xs text-[#5F6B76]">{c.org}</div>
-                    <div className="flex items-center gap-1.5 text-sm font-semibold text-[#17365D] tabular-nums">
-                      <Icon name="pin" size={14} />
-                      {c.loc} · {distanceLabel(c.km, L)}
-                    </div>
-                    <div className="text-sm font-bold text-[#287D73] tabular-nums">{c.pay}</div>
-                    <button
-                      onClick={() => onSelectDetail(c)}
-                      className="mt-auto min-h-11 rounded-lg border border-[#DCE3EA] text-sm font-bold text-[#245A91] hover:bg-[#F7F9FC] transition-colors"
-                    >
-                      {dt('details', L)}
-                    </button>
-                  </article>
-                ))}
+                {centers.slice(0, 3).map((c) => {
+                  const centerSaved = Boolean(shortlist[c.id]);
+                  return (
+                    <article key={c.id} className="p-4 rounded-xl border border-[#DCE3EA] bg-white flex flex-col gap-2">
+                      <h3 className="text-base font-extrabold text-[#17365D] leading-snug">{c.title}</h3>
+                      <div className="text-xs text-[#5F6B76]">{c.org}</div>
+                      <div className="flex items-center gap-1.5 text-sm font-semibold text-[#17365D] tabular-nums">
+                        <Icon name="pin" size={14} />
+                        {c.loc} · {distanceLabel(c.km, L)}
+                      </div>
+                      <div className="text-sm font-bold text-[#287D73] tabular-nums">{c.pay}</div>
+                      <div className="mt-auto pt-2 flex items-center gap-2">
+                        <button
+                          onClick={() => onSelectDetail(c)}
+                          className="flex-1 min-h-11 rounded-lg border border-[#DCE3EA] text-sm font-bold text-[#245A91] hover:bg-[#F7F9FC] transition-colors"
+                        >
+                          {dt('details', L)}
+                        </button>
+                        <button
+                          onClick={() => toggleShortlist(c.id, { ...c, type: 'Training' })}
+                          aria-pressed={centerSaved}
+                          className={`min-h-11 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-1 transition-colors ${
+                            centerSaved
+                              ? 'bg-[#FFF4DB] text-[#B8691A] border border-[#EBCB7A]'
+                              : 'bg-white border border-[#DCE3EA] text-[#5F6B76] hover:border-[#287D73]'
+                          }`}
+                        >
+                          <Icon name="star" size={14} className={centerSaved ? 'fill-[#D9822B]' : ''} />
+                          {centerSaved ? dt('savedBtn', L) : dt('saveBtn', L)}
+                        </button>
+                      </div>
+                    </article>
+                  );
+                })}
               </div>
             )}
           </Panel>

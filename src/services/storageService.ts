@@ -1,10 +1,11 @@
-import { BeneficiaryProfile, LocationLivelihoodData } from '../types';
+import { BeneficiaryProfile, LocationLivelihoodData, Opportunity } from '../types';
 
 const DATA_CACHE_NAME = 'jeevika-data-v1.4.0';
 
 const STORAGE_KEYS = {
   PROFILE: 'jeevika_profile_v1',
   SHORTLIST: 'jeevika_shortlist_v1',
+  SHORTLIST_ITEMS: 'jeevika_shortlist_items_v1',
   ROADMAP_PROGRESS: 'jeevika_roadmap_progress_v1',
   CURRENT_STEP: 'jeevika_current_step_v1',
   LIVELIHOOD_DATA: 'jeevika_location_livelihood_cache_v2',
@@ -114,6 +115,23 @@ export const storageService = {
   loadShortlist(): Record<string, boolean> {
     try {
       const data = localStorage.getItem(STORAGE_KEYS.SHORTLIST);
+      return data ? JSON.parse(data) : {};
+    } catch (e) {
+      return {};
+    }
+  },
+
+  saveShortlistItems(items: Record<string, Opportunity>): void {
+    try {
+      localStorage.setItem(STORAGE_KEYS.SHORTLIST_ITEMS, JSON.stringify(items));
+    } catch (e) {
+      // Ignore
+    }
+  },
+
+  loadShortlistItems(): Record<string, Opportunity> {
+    try {
+      const data = localStorage.getItem(STORAGE_KEYS.SHORTLIST_ITEMS);
       return data ? JSON.parse(data) : {};
     } catch (e) {
       return {};

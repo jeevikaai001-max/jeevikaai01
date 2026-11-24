@@ -7,7 +7,7 @@ import {
   SummaryModalData,
   LocationLivelihoodData,
 } from './types';
-import { DEMO } from './data/mockData';
+import { DEMO, JOBS } from './data/mockData';
 import { storageService } from './services/storageService';
 import { authService, AppUser, firestoreService } from './services/firebase';
 import { locationIntelligenceService } from './services/locationIntelligenceService';
@@ -66,6 +66,7 @@ export function App() {
   const [profile, setProfile] = useState<BeneficiaryProfile | null>(() => storageService.loadProfile());
   const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
   const [shortlist, setShortlist] = useState<Record<string, boolean>>(() => storageService.loadShortlist());
+  const [savedItems, setSavedItems] = useState<Record<string, Opportunity>>(() => storageService.loadShortlistItems());
   const [toastMessage, setToastMessage] = useState<string>('');
   const [selectedOpportunity, setSelectedOpportunity] = useState<Opportunity | null>(null);
   const [summaryModalData, setSummaryModalData] = useState<SummaryModalData | null>(null);
@@ -350,14 +351,70 @@ export function App() {
     notify(`डेमो प्रोफ़ाइल लोड हो गई (${demoProf.location})।`);
   };
 
-  const handleShortlistToggle = (id: string) => {
-    setShortlist((prev) => {
-      const updated = { ...prev, [id]: !prev[id] };
-      storageService.saveShortlist(updated);
-      notify(updated[id] ? 'Opportunity added to your shortlist.' : 'Opportunity removed from shortlist.');
-      return updated;
+  const handleShortlistToggle = (id: string, item?: Opportunity) => {
+    const willSave = !shortlist[id];
+    const updatedShortlist = { ...shortlist, [id]: willSave };
+    setShortlist(updatedShortlist);
+    storageService.saveShortlist(updatedShortlist);
+
+    setSavedItems((prevItems) => {
+      const nextItems = { ...prevItems };
+      if (willSave) {
+        const resolved =
+          item ||
+          locationData?.opportunities?.find((o) => o.id === id) ||
+          locationData?.trainingCenters?.find((t) => t.id === id) ||
+          JOBS.find((j) => j.id === id);
+        if (resolved) {
+          nextItems[id] = resolved;
+        }
+      } else {
+        delete nextItems[id];
+      }
+      storageService.saveShortlistItems(nextItems);
+      return nextItems;
     });
+
+    const msg = willSave
+      ? currentLang === 'bho'
+        ? 'अवसर सहेज लिहल गइल!'
+        : currentLang === 'en'
+        ? 'Saved to your shortlist.'
+        : 'सहेजे गए अवसरों में जोड़ दिया गया।'
+      : currentLang === 'bho'
+      ? 'सहेजल सूची से हटा दिहल गइल।'
+      : currentLang === 'en'
+      ? 'Removed from shortlist.'
+      : 'सहेजे गए अवसरों से हटाया गया।';
+    notify(msg);
   };
+
+  useEffect(() => {
+    const activeIds = Object.keys(shortlist).filter((id) => shortlist[id]);
+    if (activeIds.length === 0) return;
+
+    setSavedItems((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const id of activeIds) {
+        if (!next[id]) {
+          const found =
+            locationData?.opportunities?.find((o) => o.id === id) ||
+            locationData?.trainingCenters?.find((t) => t.id === id) ||
+            JOBS.find((j) => j.id === id);
+          if (found) {
+            next[id] = found;
+            changed = true;
+          }
+        }
+      }
+      if (changed) {
+        storageService.saveShortlistItems(next);
+        return next;
+      }
+      return prev;
+    });
+  }, [shortlist, locationData]);
 
   const handleProfileUpdate = async (updated: BeneficiaryProfile) => {
     setProfile(updated);
@@ -716,6 +773,9 @@ export function App() {
         {currentView === 'saved' && (
           <SavedView
             shortlist={shortlist}
+            savedItems={savedItems}
+            locationData={locationData}
+            currentLang={currentLang}
             onShortlistToggle={handleShortlistToggle}
             onSelectDetail={setSelectedOpportunity}
             go={navigateTo}
