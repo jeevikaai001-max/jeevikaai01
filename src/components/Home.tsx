@@ -90,24 +90,82 @@ export const Home: React.FC<HomeProps> = ({
     },
   ];
 
-  const faqs = [
-    {
-      q: 'क्या JeevikaAI का उपयोग करने के लिए पढ़े-लिखे होना या फॉर्म भरना जरूरी है?',
-      a: 'बिल्कुल नहीं! JeevikaAI को विशेष रूप से प्रथम-बार डिजिटल उपयोगकर्ताओं के लिए बनाया गया है। आप हिंदी या भोजपुरी में केवल बोलकर अपना हुनर बता सकते हैं। हर जानकारी बोलकर भी सुनाई जाती है।',
-    },
-    {
-      q: 'मेरी आवाज़ की गोपनीयता कैसे सुरक्षित रहती है?',
-      a: 'आपकी आवाज़ का उपयोग केवल तत्काल हुनर मूल्यांकन और प्रोफ़ाइल बनाने के लिए किया जाता है। कोई भी व्यक्तिगत डेटा आपकी सहमति के बिना किसी तीसरे पक्ष को साझा नहीं किया जाता।',
-    },
-    {
-      q: 'क्या यहाँ मिलने वाले ट्रेनिंग और जॉब्स प्रमाणित हैं?',
-      a: 'हाँ, JeevikaAI पर सूचीबद्ध प्रशिक्षण केंद्र राष्ट्रीय कौशल विकास निगम (NSDP / PMKVY) और आरसेटी (RSETI) मानकों से संरेखित हैं। वेतन और दूरी पारदर्शी रूप से प्रदर्शित की जाती हैं।',
-    },
-    {
-      q: 'क्या मैं बिना आवाज़ के केवल लिखकर भी इसका उपयोग कर सकता हूँ?',
-      a: 'हाँ! यदि आप शोरगुल वाले स्थान पर हैं या लिखकर उपयोग करना चाहते हैं, तो कीबोर्ड से उत्तर देने का विकल्प सदैव उपलब्ध रहता है।',
-    },
-  ];
+  const faqsByLang: Record<SupportedLanguage, { q: string; a: string }[]> = {
+    hi: [
+      {
+        q: 'क्या JeevikaAI का उपयोग करने के लिए पढ़े-लिखे होना या फॉर्म भरना जरूरी है?',
+        a: 'बिल्कुल नहीं! JeevikaAI को विशेष रूप से प्रथम-बार डिजिटल उपयोगकर्ताओं के लिए बनाया गया है। आप हिंदी या भोजपुरी में केवल बोलकर अपना हुनर बता सकते हैं। हर जानकारी बोलकर भी सुनाई जाती है।',
+      },
+      {
+        q: 'मेरी आवाज़ की गोपनीयता कैसे सुरक्षित रहती है?',
+        a: 'आपकी आवाज़ का उपयोग केवल तत्काल हुनर मूल्यांकन और प्रोफ़ाइल बनाने के लिए किया जाता है। कोई भी व्यक्तिगत डेटा आपकी सहमति के बिना किसी तीसरे पक्ष को साझा नहीं किया जाता।',
+      },
+      {
+        q: 'क्या यहाँ मिलने वाले ट्रेनिंग और जॉब्स प्रमाणित हैं?',
+        a: 'हाँ, JeevikaAI पर सूचीबद्ध प्रशिक्षण केंद्र राष्ट्रीय कौशल विकास निगम (NSDP / PMKVY) और आरसेटी (RSETI) मानकों से संरेखित हैं। वेतन और दूरी पारदर्शी रूप से प्रदर्शित की जाती हैं।',
+      },
+      {
+        q: 'क्या मैं बिना आवाज़ के केवल लिखकर भी इसका उपयोग कर सकता हूँ?',
+        a: 'हाँ! यदि आप शोरगुल वाले स्थान पर हैं या लिखकर उपयोग करना चाहते हैं, तो कीबोर्ड से उत्तर देने का विकल्प सदैव उपलब्ध रहता है।',
+      },
+    ],
+    bho: [
+      {
+        q: 'का JeevikaAI चलावे खातिर पढ़ल-लिखल होखल या फॉर्म भरल जरूरी बा?',
+        a: 'एकदम ना! JeevikaAI खास तौर पर पहिली बार डिजिटल इस्तेमाल करे वाला लोग खातिर बनल बा। रउआ हिंदी या भोजपुरी में खाली बोल के आपन हुनर बता सकत बानी। सब जानकारी बोल के भी सुनावल जाला।',
+      },
+      {
+        q: 'हमरा आवाज के गोपनीयता कइसे सुरक्षित रहेला?',
+        a: 'रउआ आवाज के इस्तेमाल खाली तुरंत हुनर मूल्यांकन अउर प्रोफ़ाइल बनावे खातिर कइल जाला। रउआ मर्जी के बिना कवनो निजी जानकारी केहू के शेयर ना कइल जाला।',
+      },
+      {
+        q: 'का इहाँ मिले वाला ट्रेनिंग अउर नौकरी प्रमाणित बा?',
+        a: 'हाँ, JeevikaAI पर दिखल प्रशिक्षण केंद्र PMKVY अउर RSETI मानक से जुड़ल बा। तनखाह अउर दूरी साफ-साफ देखावल जाला।',
+      },
+      {
+        q: 'का हम बिना आवाज के खाली लिख के भी एकर इस्तेमाल कर सकत बानी?',
+        a: 'हाँ! अगर रउआ शोर वाला जगह पर बानी या लिख के चलावे के चाहत बानी, त कीबोर्ड से जवाब देवे के विकल्प हमेशा मौजूद रहेला।',
+      },
+    ],
+    en: [
+      {
+        q: 'Do I need to read well or fill out forms to use JeevikaAI?',
+        a: 'Not at all! JeevikaAI is built especially for first-time digital users. You can simply speak your skills in Hindi, Bhojpuri, or English, and every key section also has audio readouts.',
+      },
+      {
+        q: 'How is my voice privacy protected?',
+        a: 'Your voice input is used only for immediate skill assessment and building your profile. No personal data is ever shared with third parties without your consent.',
+      },
+      {
+        q: 'Are the listed training centers and jobs verified?',
+        a: 'Yes, training pathways and centers listed on JeevikaAI align with NSDC / PMKVY and RSETI standards, with transparent pay ranges and distance details.',
+      },
+      {
+        q: 'Can I use the platform by typing instead of speaking?',
+        a: 'Yes! If you are in a noisy place or prefer typing, keyboard and tap-to-select options are always available.',
+      },
+    ],
+    hin: [
+      {
+        q: 'Kya JeevikaAI use karne ke liye padha-likha hona ya form bharna zaroori hai?',
+        a: 'Bilkul nahi! JeevikaAI khaas taur par first-time digital users ke liye banaya gaya hai. Aap Hindi ya Bhojpuri mein sirf bolkar apna hunar bata sakte hain aur har info sun bhi sakte hain.',
+      },
+      {
+        q: 'Meri voice privacy kaise safe rehti hai?',
+        a: 'Aapki awaaz ka use sirf instant skill assessment aur profile banane ke liye hota hai. Aapki permission ke bina koi bhi personal data share nahi kiya jaata.',
+      },
+      {
+        q: 'Kya yahan milne wali training aur jobs verified hain?',
+        a: 'Haan, JeevikaAI par listed training centers PMKVY aur RSETI standards se aligned hain, aur salary wa distance clearly dikhaye jaate hain.',
+      },
+      {
+        q: 'Kya main bina bole sirf type karke bhi use kar sakta hoon?',
+        a: 'Haan! Agar aap shor waali jagah par hain ya likhna chahte hain, toh keyboard se jawab dene ka option hamesha available hai.',
+      },
+    ],
+  };
+
+  const faqs = faqsByLang[currentLang] || faqsByLang.hi;
 
   return (
     <main className="bg-white min-h-screen">
@@ -466,10 +524,22 @@ export const Home: React.FC<HomeProps> = ({
           <div className="space-y-4">
             <div className="text-center space-y-1">
               <h3 className="text-xl sm:text-2xl font-extrabold text-[#17365D] font-['Bricolage_Grotesque']">
-                अक्सर पूछे जाने वाले प्रश्न (Frequently Asked Questions)
+                {currentLang === 'bho'
+                  ? 'अक्सर पूछल जाए वाला सवाल (FAQ)'
+                  : currentLang === 'en'
+                  ? 'Frequently Asked Questions (FAQ)'
+                  : currentLang === 'hin'
+                  ? 'Aksar Pooche Jaane Wale Sawaal (FAQ)'
+                  : 'अक्सर पूछे जाने वाले प्रश्न (Frequently Asked Questions)'}
               </h3>
               <p className="text-xs text-[#5F6B76]">
-                नागरिकों द्वारा पूछे गए मुख्य सवाल और उनके उत्तर
+                {currentLang === 'bho'
+                  ? 'नागरिकन द्वारा पूछल गइल मुख्य सवाल अउर ओकर जवाब'
+                  : currentLang === 'en'
+                  ? 'Common questions and answers for citizens using JeevikaAI'
+                  : currentLang === 'hin'
+                  ? 'Citizens dwara pooche gaye mukhya sawaal aur unke jawaab'
+                  : 'नागरिकों द्वारा पूछे गए मुख्य सवाल और उनके उत्तर'}
               </p>
             </div>
 

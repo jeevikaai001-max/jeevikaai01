@@ -512,6 +512,7 @@ export function App() {
 
   const handleStartVoiceAssessment = (lang: SupportedLanguage) => {
     setCurrentLang(lang);
+    try { localStorage.setItem('jeevika_lang', lang); } catch {}
     setShowVoiceStartModal(false);
 
     const isLogged = (currentUser && !currentUser.isAnonymous) || Boolean(profile);
@@ -833,6 +834,7 @@ export function App() {
           <HelpFAQView
             initialTab="faq"
             go={navigateTo}
+            currentLang={currentLang}
           />
         )}
 
@@ -840,6 +842,7 @@ export function App() {
           <HelpFAQView
             initialTab="accessibility"
             go={navigateTo}
+            currentLang={currentLang}
           />
         )}
 
@@ -847,6 +850,7 @@ export function App() {
           <HelpFAQView
             initialTab="privacy"
             go={navigateTo}
+            currentLang={currentLang}
           />
         )}
 
@@ -854,6 +858,7 @@ export function App() {
           <HelpFAQView
             initialTab="about"
             go={navigateTo}
+            currentLang={currentLang}
           />
         )}
 

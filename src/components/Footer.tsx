@@ -36,7 +36,13 @@ export const Footer: React.FC<FooterProps> = ({ go, currentLang }) => {
               </li>
               <li>
                 <button onClick={() => go('about')} className="hover:text-[#17365D] text-[#245A91] font-semibold">
-                  About Us
+                  {currentLang === 'bho'
+                    ? 'हमरा बारे में'
+                    : currentLang === 'en'
+                    ? 'About Us'
+                    : currentLang === 'hin'
+                    ? 'Hamare Baare Mein'
+                    : 'हमारे बारे में'}
                 </button>
               </li>
               <li>
@@ -69,17 +75,35 @@ export const Footer: React.FC<FooterProps> = ({ go, currentLang }) => {
             <ul className="space-y-2 text-xs">
               <li>
                 <button onClick={() => go('about')} className="hover:text-[#17365D]">
-                  About Us &amp; Initiative
+                  {currentLang === 'bho'
+                    ? 'हमरा बारे में अउर पहल'
+                    : currentLang === 'en'
+                    ? 'About Us & Initiative'
+                    : currentLang === 'hin'
+                    ? 'About Us & Initiative'
+                    : 'हमारे बारे में और पहल'}
                 </button>
               </li>
               <li>
                 <button onClick={() => go('accessibility')} className="hover:text-[#17365D]">
-                  Accessibility Standards
+                  {currentLang === 'bho'
+                    ? 'सुलभता मानक'
+                    : currentLang === 'en'
+                    ? 'Accessibility Standards'
+                    : currentLang === 'hin'
+                    ? 'Accessibility Standards'
+                    : 'सुलभता मानक'}
                 </button>
               </li>
               <li>
                 <button onClick={() => go('privacy')} className="hover:text-[#17365D]">
-                  Privacy Notice &amp; Consent
+                  {currentLang === 'bho'
+                    ? 'गोपनीयता अउर सहमति'
+                    : currentLang === 'en'
+                    ? 'Privacy Notice & Consent'
+                    : currentLang === 'hin'
+                    ? 'Privacy Notice & Consent'
+                    : 'गोपनीयता नीति और सहमति'}
                 </button>
               </li>
               <li>
