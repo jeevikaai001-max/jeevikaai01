@@ -1555,6 +1555,174 @@ class LocationIntelligenceService {
       );
     });
   }
+
+  private watchId: number | null = null;
+  private watchCallbacks: ((result: LocationDetectionResult) => void)[] = [];
+
+  public startBackgroundGpsTracking(onUpdate?: (result: LocationDetectionResult) => void): void {
+    if (onUpdate) {
+      this.watchCallbacks.push(onUpdate);
+    }
+    if (this.watchId !== null || typeof window === 'undefined' || !navigator.geolocation) {
+      return;
+    }
+
+    this.watchId = navigator.geolocation.watchPosition(
+      async (position) => {
+        try {
+          const { latitude, longitude, accuracy } = position.coords;
+          const accuracyMeters = Math.round(accuracy || 45);
+
+          let rawDistrict = '';
+          let locality = '';
+          let pincode = '';
+          let state = 'Uttar Pradesh';
+
+          try {
+            const bdcRes = await fetch(
+              `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`
+            );
+            if (bdcRes.ok) {
+              const bdc = await bdcRes.json();
+              const adminList = bdc.localityInfo?.administrative || [];
+              const districtEntry = adminList.find(
+                (a: any) =>
+                  (a.adminLevel === 6 || a.adminLevel === 5 || a.adminLevel === 4) &&
+                  !a.name.toLowerCase().includes('division') &&
+                  !a.name.toLowerCase().includes('mandal')
+              );
+              rawDistrict = districtEntry?.name || bdc.city || bdc.locality || '';
+              if (bdc.principalSubdivision) state = bdc.principalSubdivision;
+              if (bdc.locality) locality = bdc.locality;
+              if (bdc.postcode) pincode = bdc.postcode;
+            }
+          } catch {}
+
+          if (!rawDistrict) {
+            try {
+              const res = await fetch(
+                `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=14&addressdetails=1`,
+                { headers: { 'Accept': 'application/json' } }
+              );
+              if (res.ok) {
+                const data = await res.json();
+                const addr = data.address || {};
+                rawDistrict = addr.state_district || addr.county || addr.city || addr.town || addr.municipality || '';
+                if (!locality) locality = addr.village || addr.suburb || addr.neighbourhood || addr.residential || addr.hamlet || '';
+                if (!pincode) pincode = addr.postcode || '';
+                if (addr.state) state = addr.state;
+              }
+            } catch {}
+          }
+
+          let cleanDistrict = rawDistrict ? rawDistrict.replace(/district/i, '').trim() : '';
+          const lowerClean = cleanDistrict.toLowerCase();
+          const isStateName = ['uttar pradesh', 'bihar', 'madhya pradesh', 'rajasthan', 'jharkhand', 'maharashtra', 'haryana', 'west bengal', 'punjab', 'gujarat', 'uttarakhand', 'chhattisgarh', 'odisha', 'karnataka', 'tamil nadu', 'telangana', 'andhra pradesh', 'kerala', 'assam', 'delhi ncr', 'delhi'].some(st => lowerClean.includes(st));
+
+          if (!cleanDistrict || isStateName || cleanDistrict.length < 2) {
+            const nearest = getNearestDistrict(latitude, longitude);
+            cleanDistrict = nearest.district;
+            state = nearest.state;
+          }
+
+          const cleanLocality = locality ? locality.replace(/tahsil|tehsil|block|sub-district/gi, '').trim() : '';
+          const hasDistinctLocality = Boolean(
+            cleanLocality &&
+            cleanLocality.length > 1 &&
+            cleanLocality.toLowerCase() !== cleanDistrict.toLowerCase() &&
+            !cleanDistrict.toLowerCase().includes(cleanLocality.toLowerCase())
+          );
+          const fullLoc = hasDistinctLocality
+            ? `${cleanLocality}, ${cleanDistrict}, ${state}`
+            : `${cleanDistrict}, ${state}`;
+
+          let accuracyLevel: LocationAccuracyLevel = accuracyMeters <= 150 ? 'Precise' : 'District-level';
+          let confidenceScore = accuracyMeters <= 150 ? 95 : 85;
+          const description = `रियल-टाइम GPS ट्रैक (±${accuracyMeters}m)${cleanLocality ? ` · ${cleanLocality}` : ''}`;
+
+          const accuracyInfo: LocationAccuracyInfo = {
+            level: accuracyLevel,
+            confidenceScore,
+            accuracyMeters,
+            latitude,
+            longitude,
+            locality,
+            pincode,
+            source: 'gps',
+            description,
+          };
+
+          this.setActiveLocation(fullLoc, accuracyInfo);
+          const detectionRes: LocationDetectionResult = {
+            location: fullLoc,
+            district: cleanDistrict,
+            state,
+            accuracyLevel,
+            confidenceScore,
+            accuracyMeters,
+            latitude,
+            longitude,
+            locality,
+            pincode,
+            source: 'gps',
+            description,
+          };
+
+          this.watchCallbacks.forEach((cb) => {
+            try { cb(detectionRes); } catch {}
+          });
+        } catch (e) {
+          console.warn('Background GPS watch error:', e);
+        }
+      },
+      (error) => {
+        console.warn('Background GPS watch error:', error);
+      },
+      { enableHighAccuracy: true, maximumAge: 10000, timeout: 15000 }
+    );
+  }
+
+  public stopBackgroundGpsTracking(): void {
+    if (this.watchId !== null && typeof window !== 'undefined' && navigator.geolocation) {
+      navigator.geolocation.clearWatch(this.watchId);
+      this.watchId = null;
+    }
+    this.watchCallbacks = [];
+  }
+
+  public async searchAddressAutocomplete(query: string): Promise<Array<{ display_name: string; district: string; state: string; locality?: string }>> {
+    if (!query || query.trim().length < 2) return [];
+    try {
+      const q = encodeURIComponent(query.trim());
+      const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${q}&addressdetails=1&limit=6&countrycodes=in`, {
+        headers: { 'Accept': 'application/json' }
+      });
+      if (!res.ok) return [];
+      const data = await res.json();
+      if (!Array.isArray(data)) return [];
+
+      return data.map((item: any) => {
+        const addr = item.address || {};
+        const district = addr.state_district || addr.county || addr.city || addr.town || addr.municipality || addr.village || 'Maharajganj';
+        const state = addr.state || 'Uttar Pradesh';
+        const locality = addr.village || addr.suburb || addr.neighbourhood || addr.town || addr.city || '';
+        const cleanDistrict = district.replace(/district/i, '').trim();
+        const fullDisplay = locality && locality.toLowerCase() !== cleanDistrict.toLowerCase()
+          ? `${locality}, ${cleanDistrict}, ${state}`
+          : `${cleanDistrict}, ${state}`;
+
+        return {
+          display_name: fullDisplay,
+          district: cleanDistrict,
+          state,
+          locality
+        };
+      });
+    } catch (e) {
+      console.warn('Address autocomplete search failed:', e);
+      return [];
+    }
+  }
 }
 
 export const locationIntelligenceService = new LocationIntelligenceService();

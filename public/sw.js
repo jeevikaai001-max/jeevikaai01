@@ -1,8 +1,8 @@
-// JeevikaAI Service Worker v1.4.0 - Cache API Offline Strategy
+// JeevikaAI Service Worker v1.4.1 - Cache API Offline Strategy
 // Static Assets Precaching & Essential Livelihood Data Persistence
 
-const STATIC_CACHE_NAME = 'jeevika-static-v1.4.0';
-const DATA_CACHE_NAME = 'jeevika-data-v1.4.0';
+const STATIC_CACHE_NAME = 'jeevika-static-v1.4.1';
+const DATA_CACHE_NAME = 'jeevika-data-v1.4.1';
 const OFFLINE_URL = '/';
 
 // Precache Core App Shell and Critical Static Assets
@@ -197,11 +197,9 @@ const ESSENTIAL_LIVELIHOOD_DATA = {
 self.addEventListener('install', (event) => {
   event.waitUntil(
     Promise.all([
-      // Pre-cache static shell assets
       caches.open(STATIC_CACHE_NAME).then((cache) => {
         return cache.addAll(PRECACHE_ASSETS);
       }),
-      // Pre-cache essential livelihood dataset in Cache API
       caches.open(DATA_CACHE_NAME).then((cache) => {
         const essentialResponse = new Response(
           JSON.stringify({
@@ -233,7 +231,6 @@ self.addEventListener('activate', (event) => {
       return Promise.all(
         cacheNames.map((name) => {
           if (name !== STATIC_CACHE_NAME && name !== DATA_CACHE_NAME) {
-            console.log('[Service Worker] Deleting outdated cache:', name);
             return caches.delete(name);
           }
         })
@@ -242,14 +239,18 @@ self.addEventListener('activate', (event) => {
   );
 });
 
-// 3. Fetch Event: Multi-tiered Caching Strategy
+// 3. Fetch Event: Multi-tiered Caching Strategy with GET method guards
 self.addEventListener('fetch', (event) => {
-  const url = new URL(event.request.url);
+  const request = event.request;
+  const url = new URL(request.url);
+
+  // Only handle GET requests for cache storage operations
+  const isGet = request.method === 'GET';
 
   // A. Essential Livelihood Data Endpoint (/api/essential-livelihood-data)
   if (url.pathname.includes('/api/essential-livelihood-data') || url.pathname === '/api/livelihood-data') {
     event.respondWith(
-      caches.match(event.request).then((cached) => {
+      caches.match(request).then((cached) => {
         if (cached) return cached;
         return caches.match('/api/essential-livelihood-data').then((def) => {
           if (def) return def;
@@ -263,54 +264,44 @@ self.addEventListener('fetch', (event) => {
   }
 
   // B. Location Livelihood Generation API (/api/generate-location-data)
-  // Network-First with Cache API fallback and pre-cached essential dataset fallback
   if (url.pathname.includes('/api/generate-location-data')) {
     event.respondWith(
       (async () => {
         const dataCache = await caches.open(DATA_CACHE_NAME);
 
         try {
-          // Attempt network fetch with 6-second timeout for responsive UX
           const controller = new AbortController();
           const timeoutId = setTimeout(() => controller.abort(), 6000);
 
-          const networkResponse = await fetch(event.request.clone(), {
+          const networkResponse = await fetch(request.clone(), {
             signal: controller.signal
           });
           clearTimeout(timeoutId);
 
-          if (networkResponse && networkResponse.ok) {
+          if (networkResponse && networkResponse.ok && isGet) {
             const clone = networkResponse.clone();
-            // Cache the live payload under GET /api/livelihood-data
             await dataCache.put('/api/livelihood-data', clone);
+            return networkResponse;
+          } else if (networkResponse) {
             return networkResponse;
           }
         } catch (fetchErr) {
-          // Network failed or offline - fall through to Cache API
+          // Network failed
         }
 
-        // Offline Fallback 1: Return last cached live livelihood dataset
         const cachedLiveData = await dataCache.match('/api/livelihood-data');
-        if (cachedLiveData) {
-          return cachedLiveData;
-        }
+        if (cachedLiveData) return cachedLiveData;
 
-        // Offline Fallback 2: Return pre-cached baseline essential livelihood dataset
         const baselineData = await dataCache.match('/api/essential-livelihood-data');
-        if (baselineData) {
-          return baselineData;
-        }
+        if (baselineData) return baselineData;
 
-        // Offline Fallback 3: Return raw synthesized JSON response
         return new Response(
           JSON.stringify({
             fallback: false,
             offline: true,
             result: ESSENTIAL_LIVELIHOOD_DATA
           }),
-          {
-            headers: { 'Content-Type': 'application/json' }
-          }
+          { headers: { 'Content-Type': 'application/json' } }
         );
       })()
     );
@@ -325,10 +316,12 @@ self.addEventListener('fetch', (event) => {
         try {
           const controller = new AbortController();
           const timeoutId = setTimeout(() => controller.abort(), 6000);
-          const networkRes = await fetch(event.request.clone(), { signal: controller.signal });
+          const networkRes = await fetch(request.clone(), { signal: controller.signal });
           clearTimeout(timeoutId);
-          if (networkRes && networkRes.ok) {
+          if (networkRes && networkRes.ok && isGet) {
             await dataCache.put('/api/analyze-profile', networkRes.clone());
+            return networkRes;
+          } else if (networkRes) {
             return networkRes;
           }
         } catch (e) {}
@@ -352,28 +345,23 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // D. Offline Profile Sync (/api/offline-profile)
+  // D. Offline Profile Sync (/api/offline-profile) - POST/PUT without cache.put on request
   if (url.pathname.includes('/api/offline-profile')) {
-    if (event.request.method === 'POST' || event.request.method === 'PUT') {
+    if (!isGet) {
       event.respondWith(
-        (async () => {
-          const clone = event.request.clone();
-          const cache = await caches.open(DATA_CACHE_NAME);
-          await cache.put('/api/offline-profile', clone);
-          return fetch(event.request).catch(
-            () =>
-              new Response(JSON.stringify({ success: true, offlineSaved: true }), {
-                headers: { 'Content-Type': 'application/json' }
-              })
-          );
-        })()
+        fetch(request).catch(
+          () =>
+            new Response(JSON.stringify({ success: true, offlineSaved: true }), {
+              headers: { 'Content-Type': 'application/json' }
+            })
+        )
       );
       return;
     } else {
       event.respondWith(
-        caches.match('/api/offline-profile').then((cached) => {
+        caches.match(request).then((cached) => {
           if (cached) return cached;
-          return fetch(event.request).catch(
+          return fetch(request).catch(
             () => new Response(JSON.stringify(null), { headers: { 'Content-Type': 'application/json' } })
           );
         })
@@ -385,35 +373,33 @@ self.addEventListener('fetch', (event) => {
   // E. General API Fallback
   if (url.pathname.startsWith('/api/')) {
     event.respondWith(
-      fetch(event.request).catch(() => {
+      fetch(request).catch(() => {
         return new Response(
           JSON.stringify({
             fallback: true,
             offline: true,
             message: 'Device is offline. Using local rule engine & cached data.'
           }),
-          {
-            headers: { 'Content-Type': 'application/json' }
-          }
+          { headers: { 'Content-Type': 'application/json' } }
         );
       })
     );
     return;
   }
 
-  // F. Navigation Requests (HTML Pages): Network-first with cache fallback
-  if (event.request.mode === 'navigate') {
+  // F. Navigation Requests (HTML Pages)
+  if (request.mode === 'navigate') {
     event.respondWith(
-      fetch(event.request)
+      fetch(request)
         .then((response) => {
-          if (response && response.status === 200) {
+          if (response && response.status === 200 && isGet) {
             const clone = response.clone();
-            caches.open(STATIC_CACHE_NAME).then((cache) => cache.put(event.request, clone));
+            caches.open(STATIC_CACHE_NAME).then((cache) => cache.put(request, clone));
           }
           return response;
         })
         .catch(async () => {
-          const cached = await caches.match(event.request);
+          const cached = await caches.match(request);
           if (cached) return cached;
           return caches.match(OFFLINE_URL);
         })
@@ -421,15 +407,15 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // G. Google Fonts & Static Fonts (fonts.googleapis.com, fonts.gstatic.com)
+  // G. Google Fonts & Static Fonts
   if (url.hostname.includes('googleapis.com') || url.hostname.includes('gstatic.com')) {
     event.respondWith(
-      caches.match(event.request).then((cached) => {
+      caches.match(request).then((cached) => {
         if (cached) return cached;
-        return fetch(event.request).then((response) => {
-          if (response && response.status === 200) {
+        return fetch(request).then((response) => {
+          if (response && response.status === 200 && isGet) {
             const clone = response.clone();
-            caches.open(STATIC_CACHE_NAME).then((cache) => cache.put(event.request, clone));
+            caches.open(STATIC_CACHE_NAME).then((cache) => cache.put(request, clone));
           }
           return response;
         }).catch(() => cached);
@@ -438,39 +424,38 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // H. Static Assets (CSS, JS, SVG, Images, Webmanifest): Cache-first with Stale-While-Revalidate
+  // H. Static Assets (CSS, JS, SVG, Images, Webmanifest)
   event.respondWith(
-    caches.match(event.request).then((cachedResponse) => {
+    caches.match(request).then((cachedResponse) => {
       if (cachedResponse) {
-        // Revalidate in background when online
-        fetch(event.request)
-          .then((networkResponse) => {
-            if (networkResponse && networkResponse.status === 200) {
-              caches.open(STATIC_CACHE_NAME).then((cache) => cache.put(event.request, networkResponse));
-            }
-          })
-          .catch(() => {
-            // Ignore network errors when offline
-          });
+        if (isGet) {
+          fetch(request)
+            .then((networkResponse) => {
+              if (networkResponse && networkResponse.status === 200) {
+                caches.open(STATIC_CACHE_NAME).then((cache) => cache.put(request, networkResponse));
+              }
+            })
+            .catch(() => {});
+        }
         return cachedResponse;
       }
 
-      return fetch(event.request).then((networkResponse) => {
+      return fetch(request).then((networkResponse) => {
         if (
           !networkResponse ||
           networkResponse.status !== 200 ||
-          (networkResponse.type !== 'basic' && networkResponse.type !== 'cors')
+          (networkResponse.type !== 'basic' && networkResponse.type !== 'cors') ||
+          !isGet
         ) {
           return networkResponse;
         }
         const responseToCache = networkResponse.clone();
         caches.open(STATIC_CACHE_NAME).then((cache) => {
-          cache.put(event.request, responseToCache);
+          cache.put(request, responseToCache);
         });
         return networkResponse;
       }).catch(async () => {
-        // Fallback for missing images or assets
-        if (event.request.destination === 'image') {
+        if (request.destination === 'image') {
           return caches.match('/icons/icon-192.svg');
         }
         return null;
@@ -479,7 +464,7 @@ self.addEventListener('fetch', (event) => {
   );
 });
 
-// Background Push Notification Event Handlers for PWA
+// Background Push Notification Event Handlers
 self.addEventListener('push', (event) => {
   const data = event.data
     ? event.data.json()
