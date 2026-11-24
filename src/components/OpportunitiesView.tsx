@@ -172,14 +172,17 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
       }
     });
 
-    JOBS.filter((j) => j.type !== 'Training').forEach((opp) => {
-      const key = `${opp.title.toLowerCase().trim()}|${opp.org.toLowerCase().trim()}`;
-      if (!seenKeys.has(key) && !seenKeys.has(opp.id)) {
-        seenKeys.add(key);
-        seenKeys.add(opp.id);
-        list.push({ ...opp, isLiveFirestore: false, fromLocationData: false });
-      }
-    });
+    const hasLiveLocationOpportunities = list.length > 0;
+    if (!hasLiveLocationOpportunities) {
+      JOBS.filter((j) => j.type !== 'Training').forEach((opp) => {
+        const key = `${opp.title.toLowerCase().trim()}|${opp.org.toLowerCase().trim()}`;
+        if (!seenKeys.has(key) && !seenKeys.has(opp.id)) {
+          seenKeys.add(key);
+          seenKeys.add(opp.id);
+          list.push({ ...opp, isLiveFirestore: false, fromLocationData: false });
+        }
+      });
+    }
 
     return list;
   }, [firestoreOpportunities, locationData]);

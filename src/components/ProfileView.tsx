@@ -4,6 +4,7 @@ import { BeneficiaryProfile, SupportedLanguage } from '../types';
 import { EDU, WORK, MOB, SKILL_CHIPS, INTEREST_CHIPS } from '../data/mockData';
 import { splitList } from '../services/recommendationEngine';
 import { speechService, SpeechRecognitionResultWrapper } from '../services/speechService';
+import { aiGateway } from '../services/aiGateway';
 import { locationIntelligenceService } from '../services/locationIntelligenceService';
 import { LocationAccuracyBadge } from './LocationAccuracyBadge';
 import { uploadToCloudinary } from '../services/cloudinaryService';
@@ -198,23 +199,18 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
             setVoiceStatusText('JeevikaAI विश्लेषण कर रहा है...');
 
             try {
-              const res = await fetch('/api/parse-speech', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  message: rawText,
-                  language: currentLang,
-                  currentProfile: form,
-                  stepKey: 'skills',
-                }),
+              const data = await aiGateway.parseSpeech({
+                message: rawText,
+                language: currentLang,
+                currentProfile: form,
+                stepKey: 'skills',
               });
-              if (res.ok) {
-                const data = await res.json();
-                const updatedFields = data.updatedProfileFields || {};
+              if (data) {
+                const updatedFields = data.updatedProfile || data.updatedProfileFields || {};
                 const merged = { ...form, ...updatedFields };
                 setForm(merged);
                 onUpdateProfile(merged);
-                const reply = data.reply || 'आपकी जानकारी अपडेट कर दी गई है।';
+                const reply = data.summary || data.reply || 'आपकी जानकारी अपडेट कर दी गई है।';
                 speechService.speak(reply, currentLang);
                 onNotify(reply);
               } else {

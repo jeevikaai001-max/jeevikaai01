@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { LogoMark } from './Logo';
 import { Icon } from './Icons';
-import { SupportedLanguage, AppView, BeneficiaryProfile, LocationLivelihoodData } from '../types';
+import { SupportedLanguage, AppView, BeneficiaryProfile, LocationLivelihoodData, Opportunity } from '../types';
 import { speechService, SpeechRecognitionResultWrapper } from '../services/speechService';
 import { processLocalAssistantQuery } from '../services/aiAssistantEngine';
 import { voiceVocabularyCache } from '../services/voiceVocabularyCache';
 import { locationIntelligenceService } from '../services/locationIntelligenceService';
+import { aiGateway, VoiceAppAction } from '../services/aiGateway';
 import { LocationAccuracyBadge } from './LocationAccuracyBadge';
 
 interface FloatingVoiceAssistantProps {
@@ -18,6 +19,11 @@ interface FloatingVoiceAssistantProps {
   activeLocation?: string;
   onLocationChange?: (newLoc: string) => void;
   locationData?: LocationLivelihoodData | null;
+  onLanguageChange?: (lang: SupportedLanguage) => void;
+  onSelectOpportunity?: (opp: Opportunity) => void;
+  onShortlistToggle?: (id: string, item?: Opportunity) => void;
+  onRefreshLocationAi?: () => Promise<void> | void;
+  onStartAssessment?: () => void;
 }
 
 export const FloatingVoiceAssistant: React.FC<FloatingVoiceAssistantProps> = ({
@@ -30,6 +36,11 @@ export const FloatingVoiceAssistant: React.FC<FloatingVoiceAssistantProps> = ({
   activeLocation,
   onLocationChange,
   locationData,
+  onLanguageChange,
+  onSelectOpportunity,
+  onShortlistToggle,
+  onRefreshLocationAi,
+  onStartAssessment,
 }) => {
   const [isOpen, setIsOpen] = useState<boolean>(false);
   const [isListening, setIsListening] = useState<boolean>(false);
@@ -653,22 +664,26 @@ export const FloatingVoiceAssistant: React.FC<FloatingVoiceAssistantProps> = ({
 
     let finalReply = localResult.reply;
     let spokenText = localResult.spokenReply;
-    let targetView = localResult.targetView;
+    let targetView: string | null = localResult.targetView;
     let actionHighlight = localResult.actionHighlight;
     let profileUpdates = sanitizeProfileUpdates(localResult.profileUpdates);
+    let appAction: VoiceAppAction = null;
+    let actionPayload: { language?: SupportedLanguage; index?: number; opportunityTitle?: string } | null = null;
+    let usedLiveGemini = false;
     const isCardRead = localResult.isCardReadout;
 
     voiceVocabularyCache.addPhrase(queryText, 'navigation', currentLang);
 
-    if (!localResult.matchedIntent) {
+    // Gemini-First Architecture: always query Gemini (via Cloudflare Worker or Express /api/chat) when online
+    // so both conversational Q&A AND voice actions/navigation are powered by live Gemini intelligence.
+    // Falls back seamlessly to localResult when offline or if upstream fails.
+    if (typeof navigator === 'undefined' || navigator.onLine) {
       setIsAiThinking(true);
       try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 14000);
-
         const locationLabel = (locationData as any)?.locationLabel || locationData?.location;
         const targetLocation = activeLocation || profile?.location || locationLabel || 'Maharajganj, Uttar Pradesh';
-        const requestPayload = JSON.stringify({
+
+        const data = await aiGateway.chat({
           message: queryText,
           language: currentLang,
           currentView,
@@ -683,6 +698,7 @@ export const FloatingVoiceAssistant: React.FC<FloatingVoiceAssistantProps> = ({
                 district: locationData.district,
                 state: locationData.state,
                 opportunities: (locationData.opportunities || []).slice(0, 6).map((o) => ({
+                  id: o.id,
                   title: o.title,
                   org: o.org,
                   pay: o.pay,
@@ -693,6 +709,7 @@ export const FloatingVoiceAssistant: React.FC<FloatingVoiceAssistantProps> = ({
                   contactPhone: (o as any).contactPhone ?? o.contactInfo,
                 })),
                 trainingCenters: (locationData.trainingCenters || []).slice(0, 5).map((t) => ({
+                  id: t.id,
                   title: t.title,
                   org: t.org,
                   pay: t.pay,
@@ -706,49 +723,22 @@ export const FloatingVoiceAssistant: React.FC<FloatingVoiceAssistantProps> = ({
             : null,
         });
 
-        let response: Response | null = null;
-        try {
-          response = await fetch('/api/chat', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: requestPayload,
-            signal: controller.signal,
-          });
-        } catch {
-          response = null;
-        }
-
-        const workerUrl = ((import.meta as any).env?.VITE_CLOUDFLARE_WORKER_URL || '').trim();
-        if ((!response || !response.ok) && workerUrl) {
-          try {
-            response = await fetch(workerUrl, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: requestPayload,
-              signal: controller.signal,
-            });
-          } catch {
-            // Ignore worker network error, fallback to localResult
+        if (data && !data.fallback && typeof data.reply === 'string' && data.reply.trim() && !data.error) {
+          usedLiveGemini = true;
+          finalReply = data.reply.trim();
+          spokenText = (typeof data.spokenReply === 'string' && data.spokenReply.trim()) ? data.spokenReply.trim() : finalReply;
+          targetView = data.targetView ?? (localResult.matchedIntent ? localResult.targetView : null);
+          actionHighlight = data.actionHighlight ?? (localResult.matchedIntent ? localResult.actionHighlight : undefined);
+          appAction = data.appAction || null;
+          actionPayload = data.actionPayload || null;
+          const liveUpdates = sanitizeProfileUpdates(data.profileUpdates);
+          if (liveUpdates) {
+            profileUpdates = { ...(profileUpdates || {}), ...liveUpdates };
           }
-        }
-
-        clearTimeout(timeoutId);
-
-        if (response && response.ok) {
-          const data = await response.json();
-          const extractedReply = data.reply || data.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (extractedReply && typeof extractedReply === 'string' && !data.error) {
-            finalReply = extractedReply;
-            spokenText = extractedReply;
-            if (data.targetView) targetView = data.targetView;
-            if (data.actionHighlight) actionHighlight = data.actionHighlight;
-            const liveUpdates = sanitizeProfileUpdates(data.profileUpdates);
-            if (liveUpdates) profileUpdates = liveUpdates;
-            setIsOffline(false);
-          }
+          setIsOffline(false);
         }
       } catch (err) {
-        console.warn('Voice assistant fallback:', err);
+        console.warn('Voice assistant falling back to local offline engine:', err);
       } finally {
         setIsAiThinking(false);
       }
@@ -756,7 +746,54 @@ export const FloatingVoiceAssistant: React.FC<FloatingVoiceAssistantProps> = ({
 
     setChatHistory((prev) => [...prev, { sender: 'ai', text: finalReply }]);
 
-    if (isCardRead) {
+    // Execute Voice-Controlled App Actions returned by Gemini
+    if (appAction === 'detect_gps') {
+      setActionNotice(currentLang === 'en' ? '📍 Detecting live GPS location...' : '📍 लाइव जीपीएस लोकेशन खोजी जा रही है...');
+      setTimeout(() => setActionNotice(null), 3500);
+      locationIntelligenceService
+        .detectGpsLocation()
+        .then((detected) => {
+          if (detected?.location && onLocationChange) {
+            onLocationChange(detected.location);
+          }
+        })
+        .catch(() => {});
+    } else if (appAction === 'refresh_location_data' && onRefreshLocationAi) {
+      setActionNotice(currentLang === 'en' ? '✨ Refreshing live area data...' : '✨ आपके क्षेत्र का लाइव डेटा ताज़ा हो रहा है...');
+      setTimeout(() => setActionNotice(null), 3500);
+      Promise.resolve(onRefreshLocationAi()).catch(() => {});
+    } else if (appAction === 'change_language' && actionPayload?.language && onLanguageChange) {
+      const nextLang = actionPayload.language;
+      if (['hi', 'bho', 'en', 'hin'].includes(nextLang)) {
+        onLanguageChange(nextLang);
+        setActionNotice(nextLang === 'en' ? '🌐 Switched to English' : nextLang === 'bho' ? '🌐 भोजपुरी भाषा सक्रिय' : '🌐 हिंदी भाषा सक्रिय');
+        setTimeout(() => setActionNotice(null), 3000);
+      }
+    } else if (appAction === 'open_opportunity' && onSelectOpportunity) {
+      const pool =
+        currentView === 'training'
+          ? locationData?.trainingCenters || []
+          : locationData?.opportunities || [];
+      const idx = typeof actionPayload?.index === 'number' ? Math.max(0, actionPayload.index) : 0;
+      const picked = pool[idx] || pool[0];
+      if (picked) {
+        onSelectOpportunity(picked);
+        setActionNotice(currentLang === 'en' ? `📄 Opening ${picked.title}` : `📄 ${picked.title} खोला जा रहा है...`);
+        setTimeout(() => setActionNotice(null), 3000);
+      }
+    } else if (appAction === 'save_opportunity' && onShortlistToggle) {
+      const pool =
+        currentView === 'training'
+          ? locationData?.trainingCenters || []
+          : locationData?.opportunities || [];
+      const idx = typeof actionPayload?.index === 'number' ? Math.max(0, actionPayload.index) : 0;
+      const picked = pool[idx] || pool[0];
+      if (picked) {
+        onShortlistToggle(picked.id, picked);
+      }
+    } else if (appAction === 'start_assessment' && onStartAssessment) {
+      onStartAssessment();
+    } else if (isCardRead && !usedLiveGemini) {
       setActionNotice(
         currentLang === 'en' ? '📖 Reading Screen Data Aloud...' : '📖 स्क्रीन का डेटा बोलकर सुनाया जा रहा है...'
       );
@@ -799,7 +836,7 @@ export const FloatingVoiceAssistant: React.FC<FloatingVoiceAssistantProps> = ({
 
     processingRef.current = false;
 
-    const cleanSpoken = spokenText.replace(/\*\*/g, '').replace(/[#•]/g, '').trim();
+    const cleanSpoken = spokenText.replace(/\*\*/g, '').replace(/[#•*]/g, '').trim();
     speakAndAutoListen(cleanSpoken);
   };
 

@@ -10,6 +10,7 @@ import {
 } from '../types';
 import { JOBS } from '../data/mockData';
 import { storageService } from './storageService';
+import { aiGateway } from './aiGateway';
 
 // Storage key for caching current location livelihood data
 const LOCATION_DATA_CACHE_KEY = 'jeevika_location_livelihood_cache_v2';
@@ -833,7 +834,9 @@ const CURATED_DISTRICT_DATABASE: Record<string, Partial<LocationLivelihoodData>>
  */
 export function normalizeDistrictKey(districtStr: string): string {
   if (!districtStr) return 'maharajganj';
-  let s = districtStr.toLowerCase().trim();
+  const parts = districtStr.split(',').map((p) => p.trim()).filter(Boolean);
+  const raw = parts.length >= 3 ? parts[parts.length - 2] : parts[0] || districtStr;
+  let s = raw.toLowerCase().trim();
   s = s.replace(/ज़िला|जिला|district|शहर|city|town/gi, '').trim();
 
   if (s.includes('ghaziabad') || s.includes('गाजियाबाद') || s.includes('ग़ाज़ियाबाद')) return 'ghaziabad';
@@ -841,9 +844,9 @@ export function normalizeDistrictKey(districtStr: string): string {
   if (s.includes('lucknow') || s.includes('लखनऊ')) return 'lucknow';
   if (s.includes('varanasi') || s.includes('वाराणसी') || s.includes('बनारस') || s.includes('kashi')) return 'varanasi';
   if (s.includes('patna') || s.includes('पटना')) return 'patna';
-  if (s.includes('noida') || s.includes('नोएडा') || s.includes('gautam buddha')) return 'ghaziabad';
-  if (s.includes('delhi') || s.includes('दिल्ली')) return 'ghaziabad';
-  if (s.includes('kanpur') || s.includes('कानपुर')) return 'ghaziabad';
+  if (s.includes('noida') || s.includes('नोएडा') || s.includes('gautam buddha')) return 'noida';
+  if (s.includes('delhi') || s.includes('दिल्ली')) return 'delhi';
+  if (s.includes('kanpur') || s.includes('कानपुर')) return 'kanpur';
   if (s.includes('maharajganj') || s.includes('महराजगंज')) return 'maharajganj';
 
   return s.replace(/[^a-z0-9]/g, '') || 'maharajganj';
@@ -1059,8 +1062,10 @@ class LocationIntelligenceService {
       const activeKey = normalizeDistrictKey(loc);
       const cachedKey = normalizeDistrictKey(this.cachedData.location || '');
       if (activeKey !== cachedKey) {
-        const parts = loc.split(',').map((p) => p.trim());
-        return this.buildFallbackData(loc, parts[0] || 'Ghaziabad', parts[1] || 'Uttar Pradesh');
+        const parts = loc.split(',').map((p) => p.trim()).filter(Boolean);
+        const district = parts.length >= 3 ? parts[parts.length - 2] : parts[0] || 'Maharajganj';
+        const state = parts.length >= 2 ? parts[parts.length - 1] : 'Uttar Pradesh';
+        return this.buildFallbackData(loc, district, state);
       }
     }
     return this.cachedData;
@@ -1093,45 +1098,55 @@ class LocationIntelligenceService {
     });
   }
 
+  private inFlightRequests = new Map<string, Promise<LocationLivelihoodData>>();
+
   /**
-   * Generates or fetches actual location-based livelihood data.
-   * Calls the Gemini API backend proxy (/api/generate-location-data),
-   * with graceful fallback to Service Worker Cache API and curated local datasets.
+   * Generates or fetches actual location-based personalized livelihood data.
+   * Routes through aiGateway (Cloudflare Worker when VITE_CLOUDFLARE_WORKER_URL is set,
+   * otherwise local Express /api/generate-location-data), with graceful offline fallback.
    */
   public async fetchLocationData(
     targetLocation?: string,
     currentLang: SupportedLanguage = 'hi',
-    userProfile?: BeneficiaryProfile | null
+    userProfile?: BeneficiaryProfile | null,
+    forceRefresh = false
   ): Promise<LocationLivelihoodData> {
     const loc = (targetLocation || this.activeLocation || 'Maharajganj, Uttar Pradesh').trim();
     this.setActiveLocation(loc);
 
     const parts = loc.split(',').map((p) => p.trim()).filter(Boolean);
-    const district = parts.length >= 3 ? parts[parts.length - 2] : (parts[0] || 'Maharajganj');
+    const localityFromStr = parts.length >= 3 ? parts[0] : '';
+    const district = parts.length >= 3 ? parts[parts.length - 2] : parts[0] || 'Maharajganj';
     const state = parts.length >= 2 ? parts[parts.length - 1] : 'Uttar Pradesh';
 
-    // 1. Try Live Gemini API Backend Proxy
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 30000);
+    const accuracy = this.getLocationAccuracy();
+    const locality = localityFromStr || accuracy.locality || '';
+    const pincode = accuracy.pincode || '';
+    const profileSig = [
+      userProfile?.education || '',
+      userProfile?.skills || '',
+      userProfile?.interests || '',
+      userProfile?.workType || '',
+    ].join('|');
+    const requestKey = `${loc.toLowerCase()}|${currentLang}|${profileSig.toLowerCase()}`;
 
-      const res = await fetch('/api/generate-location-data', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+    if (!forceRefresh && this.inFlightRequests.has(requestKey)) {
+      return this.inFlightRequests.get(requestKey)!;
+    }
+
+    const runFetch = async (): Promise<LocationLivelihoodData> => {
+      // 1. Try Live Gemini API via AI Gateway (Cloudflare Worker -> Express fallback)
+      try {
+        const payload = await aiGateway.generateLocationData({
           location: loc,
           district,
           state,
+          locality,
+          pincode,
           language: currentLang,
-          existingProfile: userProfile || {}
-        }),
-        signal: controller.signal
-      });
+          existingProfile: userProfile || {},
+        });
 
-      clearTimeout(timeoutId);
-
-      if (res.ok) {
-        const payload = await res.json();
         if (payload && payload.result && !payload.fallback) {
           const toStringArray = (val: unknown): string[] => {
             if (Array.isArray(val)) return val.map((x) => String(x).trim()).filter(Boolean);
@@ -1142,19 +1157,25 @@ class LocationIntelligenceService {
             ...o,
             documentsRequired: toStringArray(o?.documentsRequired),
           });
-          const rawInsight = payload.result.insight || this.getDefaultInsight(district, state);
-          const accuracy = this.getLocationAccuracy();
+          const resolvedDistrict = payload.result.district || district;
+          const resolvedState = payload.result.state || state;
+          const rawInsight = payload.result.insight || this.getDefaultInsight(resolvedDistrict, resolvedState);
+          const coords = getDistrictCoordinates(resolvedDistrict);
           const liveData: LocationLivelihoodData = {
             location: loc,
-            district: payload.result.district || district,
-            state: payload.result.state || state,
+            district: resolvedDistrict,
+            state: resolvedState,
             isAiGenerated: true,
             timestamp: new Date().toISOString(),
             accuracyLevel: accuracy.level,
             confidenceScore: accuracy.confidenceScore,
             accuracyMeters: accuracy.accuracyMeters,
+            latitude: accuracy.latitude || coords.lat,
+            longitude: accuracy.longitude || coords.lng,
             insight: {
               ...rawInsight,
+              district: rawInsight?.district || resolvedDistrict,
+              state: rawInsight?.state || resolvedState,
               topSectors: toStringArray(rawInsight?.topSectors),
             },
             opportunities: Array.isArray(payload.result.opportunities)
@@ -1168,28 +1189,33 @@ class LocationIntelligenceService {
           this.notify(liveData);
           return liveData;
         }
+      } catch (err) {
+        console.warn('Live location API fetch fell back to offline Cache API / curated engine:', err);
       }
-    } catch (err) {
-      console.warn('Live location API fetch fell back to offline Cache API / curated engine:', err);
-    }
 
-    // 2. Try Service Worker Cache API / Local Cached Livelihood Data
-    try {
-      const cached = await storageService.loadCachedLivelihoodData();
-      if (
-        cached &&
-        (cached.district?.toLowerCase() === district.toLowerCase() ||
-          cached.location?.toLowerCase().includes(district.toLowerCase()))
-      ) {
-        this.notify(cached);
-        return cached;
-      }
-    } catch {}
+      // 2. Try Service Worker Cache API / Local Cached Livelihood Data for the exact same district
+      try {
+        const cached = await storageService.loadCachedLivelihoodData();
+        if (
+          cached &&
+          normalizeDistrictKey(cached.district || cached.location || '') === normalizeDistrictKey(district)
+        ) {
+          this.notify(cached);
+          return cached;
+        }
+      } catch {}
 
-    // 3. Curated Match Fallback
-    const fallbackData = this.buildFallbackData(loc, district, state);
-    this.notify(fallbackData);
-    return fallbackData;
+      // 3. Curated Match Fallback
+      const fallbackData = this.buildFallbackData(loc, district, state);
+      this.notify(fallbackData);
+      return fallbackData;
+    };
+
+    const promise = runFetch().finally(() => {
+      this.inFlightRequests.delete(requestKey);
+    });
+    this.inFlightRequests.set(requestKey, promise);
+    return promise;
   }
 
   private getDefaultInsight(district: string, state: string): LocationInsight {
@@ -1339,34 +1365,34 @@ class LocationIntelligenceService {
 
     const defaultSchemes: GovernmentScheme[] = [
       {
-        id: 'sch-gen-1',
+        id: `${key}-sch-1`,
         name: 'PM Vishwakarma Yojana',
         hiName: 'प्रधानमंत्री विश्वकर्मा योजना',
         benefit: '₹15,000 टूलकिट अनुदान + ₹500/दिन प्रशिक्षण वजीफा',
         eligibility: '18 पारंपरिक कारीगर एवं शिल्पकार (दर्जी, लोहार, बढ़ई, राजमिस्त्री आदि)',
-        applyOffice: `नजदीकी CSC केंद्र या ग्राम पंचायत सचिवालय, ${district}`,
+        applyOffice: `नजदीकी CSC केंद्र या ग्राम पंचायत सचिवालय, ${cleanDistrict}`,
         category: 'toolkit',
         financialSupport: '₹15,000 टूलकिट अनुदान + ₹500/दिन प्रशिक्षण वजीफा'
       },
       {
-        id: 'sch-gen-2',
-        name: 'UP ODOP Scheme',
-        hiName: 'उत्तर प्रदेश एक जिला एक उत्पाद (ODOP) योजना',
-        benefit: '₹25,000 तक टूलकिट + व्यवसाय हेतु मार्जिन मनी',
-        eligibility: 'जिले के पारंपरिक उद्योग से जुड़े स्थानीय कामगार एवं हस्तशिल्पी',
-        applyOffice: `जिला उद्योग एवं उद्यम प्रोत्साहन केंद्र (DIC), ${district}`,
+        id: `${key}-sch-2`,
+        name: `${state} District Self-Employment & Skill Subsidy`,
+        hiName: `${state} जिला उद्यम एवं कौशल प्रोत्साहन योजना`,
+        benefit: 'स्थानीय उद्योग व स्वरोजगार हेतु टूलकिट व 25% तक मार्जिन मनी अनुदान',
+        eligibility: `${cleanDistrict} (${state}) के स्थानीय युवा, महिलाएं एवं कामगार`,
+        applyOffice: `जिला उद्योग एवं उद्यम प्रोत्साहन केंद्र (DIC), ${cleanDistrict}`,
         category: 'state',
         financialSupport: '₹25,000 तक टूलकिट + व्यवसाय हेतु मार्जिन मनी'
       },
       {
-        id: 'sch-gen-3',
+        id: `${key}-sch-3`,
         name: 'Pradhan Mantri Mudra Yojana (PMMY)',
         hiName: 'प्रधानमंत्री मुद्रा योजना (शिशु/किशोर/तरुण)',
-        benefit: 'शिशु लोन: ₹50,000 तक मात्र 3 दिन में स्वीकृत',
+        benefit: 'शिशु लोन: ₹50,000 से ₹10 लाख तक बिना गारंटी व्यवसाय ऋण',
         eligibility: 'नया व्यवसाय शुरू करने या बढ़ाने वाले ग्रामीण व शहरी नागरिक',
-        applyOffice: `किसी भी राष्ट्रीयकृत बैंक (PNB, SBI, Baroda) शाखा, ${district}`,
+        applyOffice: `किसी भी राष्ट्रीयकृत बैंक (PNB, SBI, Baroda) शाखा, ${cleanDistrict}`,
         category: 'loan',
-        financialSupport: 'शिशु लोन: ₹50,000 तक मात्र 3 दिन में स्वीकृत'
+        financialSupport: 'शिशु लोन: ₹50,000 तक बिना कोलेटरल स्वीकृति'
       }
     ];
 

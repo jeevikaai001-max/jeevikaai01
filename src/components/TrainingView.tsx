@@ -172,14 +172,17 @@ export const TrainingView: React.FC<TrainingViewProps> = ({
       }
     });
 
-    JOBS.filter((j) => j.type === 'Training').forEach((item) => {
-      const key = `${item.title.toLowerCase().trim()}|${item.org.toLowerCase().trim()}`;
-      if (!seenKeys.has(key) && !seenKeys.has(item.id)) {
-        seenKeys.add(key);
-        seenKeys.add(item.id);
-        list.push({ ...item, type: 'Training', isLiveFirestore: false, fromLocationData: false });
-      }
-    });
+    const hasLiveLocationCenters = list.length > 0;
+    if (!hasLiveLocationCenters) {
+      JOBS.filter((j) => j.type === 'Training').forEach((item) => {
+        const key = `${item.title.toLowerCase().trim()}|${item.org.toLowerCase().trim()}`;
+        if (!seenKeys.has(key) && !seenKeys.has(item.id)) {
+          seenKeys.add(key);
+          seenKeys.add(item.id);
+          list.push({ ...item, type: 'Training', isLiveFirestore: false, fromLocationData: false });
+        }
+      });
+    }
 
     return list;
   }, [firestoreTrainingCenters, locationData]);

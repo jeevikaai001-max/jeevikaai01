@@ -5,7 +5,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import os from 'os';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 
 dotenv.config();
 
@@ -15,7 +15,38 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
-app.use(express.json());
+app.use(express.json({ limit: '64kb' }));
+
+// Lightweight per-IP rate limiter for AI endpoints
+const aiRateMap = new Map<string, number[]>();
+const AI_RATE_LIMIT_PER_MIN = 40;
+const AI_RATE_WINDOW_MS = 60_000;
+
+function checkAiRateLimit(req: Request, res: Response): boolean {
+  const ip =
+    String(req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || req.ip || 'local')
+      .split(',')[0]
+      .trim();
+  const now = Date.now();
+  const windowStart = now - AI_RATE_WINDOW_MS;
+  const recent = (aiRateMap.get(ip) || []).filter((ts) => ts > windowStart);
+  if (recent.length >= AI_RATE_LIMIT_PER_MIN) {
+    res.status(429).json({ fallback: true, error: 'Too many AI requests, please wait a moment.' });
+    return false;
+  }
+  recent.push(now);
+  aiRateMap.set(ip, recent);
+  if (aiRateMap.size > 2000) {
+    for (const [k, list] of aiRateMap.entries()) {
+      if (!list.length || list[list.length - 1] < windowStart) aiRateMap.delete(k);
+    }
+  }
+  return true;
+}
+
+function clampStr(val: unknown, maxLen = 500): string {
+  return typeof val === 'string' ? val.trim().slice(0, maxLen) : '';
+}
 
 function createAiClient() {
   return new GoogleGenAI({
@@ -51,18 +82,23 @@ async function generateContentResilient(
   contents: string,
   options?: { responseMimeType?: string; timeoutMs?: number }
 ): Promise<string> {
-  const timeoutMs = options?.timeoutMs || 6500;
-  const config = options?.responseMimeType
-    ? { responseMimeType: options.responseMimeType }
-    : undefined;
+  const timeoutMs = options?.timeoutMs || 14000;
 
   let lastError: any = null;
   for (const model of CANDIDATE_MODELS) {
     try {
+      const config: Record<string, unknown> = {};
+      if (options?.responseMimeType) {
+        config.responseMimeType = options.responseMimeType;
+      }
+      if (model === 'gemini-4-hydrogen') {
+        config.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+      }
+
       const generatePromise = ai.models.generateContent({
         model,
         contents,
-        config,
+        config: Object.keys(config).length > 0 ? config : undefined,
       });
       const response = await withTimeout(generatePromise, timeoutMs);
       if (response && response.text) {
@@ -427,219 +463,106 @@ Return strictly JSON with no markdown formatting:
 
 // API Route: Floating Voice AI Assistant & Site Navigation Proxy
 app.post('/api/chat', async (req: Request, res: Response) => {
+  if (!checkAiRateLimit(req, res)) return;
   try {
-    const {
-      message,
-      language = 'hi',
-      currentView = 'home',
-      userProfile = {},
-      chatHistory = [],
-      locationData = null,
-    } = req.body;
+    const rawMessage = clampStr(req.body?.message, 1200);
+    const language = clampStr(req.body?.language, 8) || 'hi';
+    const currentView = clampStr(req.body?.currentView, 40) || 'home';
+    const userProfile = req.body?.userProfile && typeof req.body.userProfile === 'object' ? req.body.userProfile : {};
+    const chatHistory = Array.isArray(req.body?.chatHistory) ? req.body.chatHistory.slice(-10) : [];
+    const locationData = req.body?.locationData && typeof req.body.locationData === 'object' ? req.body.locationData : null;
 
-    if (!message || typeof message !== 'string') {
+    if (!rawMessage) {
       return res.status(400).json({ error: 'Message text is required' });
     }
 
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
-      const lower = message.toLowerCase();
-      let navTarget: string | null = null;
-      let highlight: string | null = null;
-      let reply =
-        'नमस्ते! मैं जीविका एआई वॉइस असिस्टेंट हूँ। आप मुझसे नौकरी, रोडमैप, या कौशल कार्ड पढ़ने के लिए कह सकते हैं।';
-
-      if (
-        lower.includes('banaya') ||
-        lower.includes('created') ||
-        lower.includes('maker') ||
-        lower.includes('developer') ||
-        lower.includes('किसने बनाया') ||
-        lower.includes('कोन बनइले')
-      ) {
-        reply =
-          'मुझे JeevikaAI Organization (जीविका एआई आर्गेनाइजेशन) द्वारा बनाया गया है ताकि हर नागरिक अपनी भाषा में आजीविका और कौशल की सही दिशा पा सके।';
-      } else if (lower.includes('roadmap') || lower.includes('रोडमैप') || lower.includes('डैशबोर्ड')) {
-        navTarget = 'dashboard';
-        highlight = 'roadmap-section';
-        if (
-          lower.includes('padh') ||
-          lower.includes('card') ||
-          lower.includes('कार्ड') ||
-          lower.includes('batao') ||
-          lower.includes('read') ||
-          lower.includes('step')
-        ) {
-          reply =
-            'आजीविका रोडमैप कार्ड: आपके लिए डिजिटल सेवाएँ और स्थानीय रोजगार सबसे उपयुक्त मार्ग है। इसमें 3 चरण हैं: 1. कंप्यूटर व फोन की बुनियादी समझ, 2. ऑनलाइन सेवाएँ व बिलिंग का अभ्यास, 3. नजदीकी सेवा काउंटर या जॉब के लिए आवेदन। आप ₹8,000 से ₹15,000 प्रति माह कमा सकते हैं।';
-        } else {
-          reply = 'जी, आपका व्यक्तिगत आजीविका रोडमैप डैशबोर्ड खोला जा रहा है।';
-        }
-      } else if (
-        lower.includes('job') ||
-        lower.includes('kaam') ||
-        lower.includes('नौकरी') ||
-        lower.includes('रोजगार') ||
-        lower.includes('naukri')
-      ) {
-        navTarget = 'opportunities';
-        highlight = 'opportunities-section';
-        if (locationData?.opportunities?.length) {
-          const topJobs = locationData.opportunities
-            .slice(0, 3)
-            .map((j: any, i: number) => `${i + 1}. ${j.title} (${j.org}) - वेतन ${j.pay}, दूरी ${j.distance}`)
-            .join('। ');
-          reply = `आपके क्षेत्र (${locationData.locationLabel || userProfile?.location || 'महराजगंज'}) की नौकरियां: ${topJobs}।`;
-        } else {
-          reply = 'जी, आपके नजदीकी रोजगार और नौकरी के अवसर खोले जा रहे हैं।';
-        }
-      } else if (
-        lower.includes('train') ||
-        lower.includes('center') ||
-        lower.includes('प्रशिक्षण') ||
-        lower.includes('केंद्र') ||
-        lower.includes('pmkvy') ||
-        lower.includes('rseti')
-      ) {
-        navTarget = 'training';
-        if (locationData?.trainingCenters?.length) {
-          const topCenters = locationData.trainingCenters
-            .slice(0, 3)
-            .map((t: any, i: number) => `${i + 1}. ${t.title} (${t.org}) - ${t.pay}, दूरी ${t.distance}`)
-            .join('। ');
-          reply = `आपके पास के कौशल प्रशिक्षण केंद्र: ${topCenters}।`;
-        } else {
-          reply = 'आपके पास के PMKVY और RSETI कौशल प्रशिक्षण केंद्र दिखाए जा रहे हैं।';
-        }
-      } else if (
-        lower.includes('gap') ||
-        lower.includes('skill') ||
-        lower.includes('कौशल') ||
-        lower.includes('हुनर')
-      ) {
-        navTarget = 'skill-gap';
-        reply =
-          'कौशल कार्ड विश्लेषण: आपके वर्तमान कौशलों के आधार पर आपकी तैयारी 85% है। उन्नत कार्य के लिए आपको डिजिटल बिलिंग और उपकरण संचालन का अभ्यास करना होगा। कौशल अंतर पेज खोला जा रहा है।';
-      } else if (
-        lower.includes('yojana') ||
-        lower.includes('योजना') ||
-        lower.includes('scheme') ||
-        lower.includes('vishwakarma') ||
-        lower.includes('mudra')
-      ) {
-        navTarget = 'faq';
-        reply =
-          'सरकारी योजना कार्ड: 1. PM विश्वकर्मा योजना - ₹15,000 टूलकिट ग्रांट व ₹3 लाख तक रियायती लोन। 2. PMKVY 4.0 - फ्री वोकेशनल ट्रेनिंग व सर्टिफिकेट। 3. PM मुद्रा योजना - ₹50,000 से ₹10 लाख तक व्यवसाय लोन।';
-      } else if (lower.includes('profile') || lower.includes('नाम') || lower.includes('प्रोफाइल')) {
-        navTarget = 'profile';
-        reply = 'आपकी प्रोफाइल खोली जा रही है।';
-      } else if (lower.includes('help') || lower.includes('faq') || lower.includes('मदद') || lower.includes('सवाल')) {
-        navTarget = 'faq';
-        reply = 'सहायता और प्रश्नोत्तर अनुभाग खोला जा रहा है।';
-      } else if (lower.includes('saved') || lower.includes('सहेजे') || lower.includes('shortlist')) {
-        navTarget = 'saved';
-        reply = 'आपके सहेजे गए अवसर दिखाए जा रहे हैं।';
-      } else if (lower.includes('home') || lower.includes('होम') || lower.includes('start') || lower.includes('शुरू')) {
-        navTarget = 'home';
-        reply = 'मुख्य पृष्ठ खोला जा रहा है जहाँ से आप नया मूल्यांकन शुरू कर सकते हैं।';
-      } else if (
-        lower.includes('setting') ||
-        lower.includes('seting') ||
-        lower.includes('सेटिंग') ||
-        lower.includes('alert') ||
-        lower.includes('notification')
-      ) {
-        navTarget = 'notifications';
-        reply = 'ऐप सेटिंग्स और सूचना प्राथमिकताएं खोली जा रही हैं।';
-      } else if (lower.includes('assessment') || lower.includes('मूल्यांकन') || lower.includes('test')) {
-        navTarget = 'assessment';
-        reply = 'आवाज़ द्वारा आजीविका मूल्यांकन शुरू किया जा रहा है।';
-      }
-
       return res.json({
         fallback: true,
-        reply,
-        targetView: navTarget,
-        actionHighlight: highlight,
+        error: 'GEMINI_API_KEY not configured on server',
       });
     }
 
-    const recentConversation = Array.isArray(chatHistory)
-      ? chatHistory
-          .slice(-8)
-          .map((turn: any) => `${turn.sender === 'user' ? 'User' : 'JeevikaAI'}: ${turn.text}`)
-          .join('\n')
-      : '';
+    const recentConversation = chatHistory
+      .map((turn: any) => `${turn?.sender === 'user' ? 'User' : 'JeevikaAI'}: ${clampStr(turn?.text, 350)}`)
+      .join('\n');
 
     const liveScreenSummary = locationData
       ? JSON.stringify({
-          location: locationData.locationLabel,
-          jobsOnScreen: locationData.opportunities || [],
-          trainingCentersOnScreen: locationData.trainingCenters || [],
-          schemesOnScreen: locationData.schemes || [],
+          location: locationData.locationLabel || `${locationData.district || ''}, ${locationData.state || ''}`,
+          jobsOnScreen: (locationData.opportunities || []).slice(0, 6),
+          trainingCentersOnScreen: (locationData.trainingCenters || []).slice(0, 5),
+          schemesOnScreen: (locationData.schemes || []).slice(0, 5),
           districtInsight: locationData.insight || null,
         })
-      : 'Standard district data active';
+      : 'No district cards loaded yet';
+
+    const langLabel =
+      language === 'bho'
+        ? 'Bhojpuri'
+        : language === 'en'
+        ? 'English'
+        : language === 'hin'
+        ? 'Hinglish'
+        : 'simple conversational Hindi';
 
     const ai = createAiClient();
-    const systemPrompt = `You are JeevikaAI (जीविका एआई), a deeply trained, compassionate, and natural conversational voice AI vocational and livelihood counselor for Indian rural and semi-urban citizens.
+    const systemPrompt = `You are JeevikaAI (जीविका एआई), an empathetic, action-capable, voice-first Indian livelihood, career, skill, and government-scheme AI assistant.
 
 You have comprehensive mastery of:
-1. Indian Vocational Ecosystem & NSQF (National Skills Qualification Framework):
-   - NSQF Levels 1-5 (Helper to Skilled Technician to Supervisor).
-   - Practical sectors: Solar PV & Green Energy, Digital Seva & Data Entry, Retail & Mandi Operations, Tailoring & Boutique Garment Craft, Electrician & Home Appliances, Mobile Phone Repair, Food Processing & Dairy SHGs.
-2. Indian Government Livelihood & Credit Schemes:
-   - PM Vishwakarma: 18 traditional artisan trades (carpenters, blacksmiths, tailors, cobblers, potters, etc.). 5-7 days basic training + ₹500/day stipend, ₹15,000 e-voucher toolkit grant, up to ₹3 lakh subsidized credit.
-   - PMKVY 4.0 (Skill India Digital Hub): Free government certification, on-the-job training (OJT) stipends, zero fee.
-   - PM Mudra Yojana: Shishu (up to ₹50k), Kishore (₹50k to ₹5L), Tarun (₹5L to ₹10L) collateral-free loans.
-   - PMEGP: 15-35% capital subsidy for manufacturing/services micro-units.
-   - RSETI (Rural Self Employment Training Institute): Run by lead banks in every district; 100% FREE residential courses with food, lodging, practical skills and bank credit linkage.
-   - State Schemes: UP ODOP & Mukhyamantri Yuva Swarojgar; Bihar Mukhyamantri Udyami Yojana; MP Udyam Kranti; Rajasthan Yuva Sambal.
-3. Live Screen Data & Active Location Grounding:
-   - User's Current Location: "${userProfile?.location || locationData?.locationLabel || 'Maharajganj, Uttar Pradesh'}".
-   - Current Page View: "${currentView}"
-   - User Language Preference: "${language}" (hi = Hindi, bho = Bhojpuri, hin = Hinglish, en = English)
+1. Indian Vocational Ecosystem & NSQF Levels 1-5 (Solar PV, Digital Seva & Data Entry, Retail & Mandi Operations, Tailoring & Boutique Craft, Electrician, Mobile Repair, Dairy & SHGs).
+2. Central & State Government Schemes (PM Vishwakarma, PMKVY 4.0, PM Mudra Yojana, PMEGP, RSETI, UP ODOP, Bihar Mukhyamantri Udyami, MP Udyam Kranti, etc.).
+3. Live Screen Grounding:
+   - User Language Preference: ${langLabel} ("${language}")
+   - Current Screen View: "${currentView}"
+   - Active User Location: "${userProfile?.location || locationData?.locationLabel || 'India'}"
    - User Profile: ${JSON.stringify(userProfile)}
-   - ACTUAL LIVE CARDS & DATA PRESENT ON SCREEN RIGHT NOW: ${liveScreenSummary}
+   - LIVE DATA CURRENTLY ON USER'S SCREEN: ${liveScreenSummary}
 
-4. Multi-Turn Conversation Memory (Previous Chat Messages):
-${recentConversation || 'No prior turns.'}
-   - User Just Spoke / Asked: "${message}"
+4. Multi-Turn Conversation Memory:
+${recentConversation || 'First turn.'}
+   - User Just Spoke / Asked: "${rawMessage}"
 
 Your Instructions:
-1. Natural Conversational Chat & Follow-Up Memory:
-   - Understand the user's question in the context of the previous chat messages above. Answer directly and specifically using the ACTUAL LIVE CARDS & DATA PRESENT ON SCREEN.
-   - Speak naturally like a warm, helpful human advisor in the user's language (${language === 'bho' ? 'Bhojpuri' : language === 'en' ? 'English' : language === 'hin' ? 'Hinglish' : 'Hindi'}) in 2-4 clear sentences suitable for voice readout.
-2. Reading Screen Data:
-   - Whenever the user asks to read any card, section, or page data, read the actual titles, organizations, pay/benefits, locations, and distances from the live screen data above.
-3. Dynamic Navigation:
-   - Allowed targetView values: "home", "dashboard", "opportunities", "training", "skill-gap", "saved", "profile", "faq", "history", "notifications", "assessment", null.
-   - Set targetView ONLY if the user wants to open/navigate to a different section; if they are asking a follow-up question on the current topic, keep targetView as null.
-4. Location or Profile Updates:
-   - If the user mentions their location/district, extract "location" into "profileUpdates".
-   - If the user mentions name, education, or skills, extract them into "profileUpdates".
+1. Natural Voice-First Replies:
+   - Answer ANY question the user asks — jobs, schemes, eligibility, documents, loan steps, interview tips, skill roadmap, reading cards aloud, or general career guidance.
+   - Use ACTUAL titles, organizations, pay, distances, and schemes from LIVE DATA CURRENTLY ON USER'S SCREEN whenever relevant.
+   - Keep "spokenReply" crisp, warm, natural for Text-to-Speech (2-4 short sentences, NO markdown symbols like *, #, •).
+   - "reply" can be nicely formatted for chat display in ${langLabel}.
+2. Voice-Controlled Navigation ("targetView"):
+   - Allowed values: "home", "dashboard", "opportunities", "training", "skill-gap", "saved", "profile", "faq", "history", "notifications", "assessment", "business-upload", or null.
+   - Set "targetView" ONLY when the user asks to open/show/go to a page or inspect cards on another page. For normal follow-up Q&A on the current screen, keep "targetView": null.
+3. Voice-Controlled App Actions ("appAction"):
+   - "detect_gps": User asks to detect/sync their live GPS location ("mera location pata karo", "GPS on karo", "current area fetch karo").
+   - "refresh_location_data": User asks to refresh/reload AI data for their area ("naya data lao", "refresh karo").
+   - "change_language": User asks to switch language ("English me bolo", "Bhojpuri me baat karo", "Hindi karo") -> set actionPayload: { "language": "hi" | "bho" | "en" | "hin" }.
+   - "open_opportunity": User asks to open details/map of a specific job or training card (e.g., "pehli naukri kholo", "second job details") -> set actionPayload: { "index": 0 } (0-based).
+   - "save_opportunity": User asks to save/shortlist a job or training card -> set actionPayload: { "index": 0 }.
+   - "start_assessment": User wants to start or redo their voice profile assessment.
+   - Otherwise null.
+4. Voice Profile & Location Updates ("profileUpdates"):
+   - If the user states a new city/village/district, name, education, or skill, extract ONLY the changed fields into "profileUpdates". Do NOT include null/empty keys.
 5. Identity:
    - If asked who made/created you, answer that you were developed by JeevikaAI Organization (जीविका एआई आर्गेनाइजेशन).
 
 Return strictly JSON with NO markdown codeblocks:
 {
-  "reply": "Warm spoken reply in user's language with no markdown symbols",
-  "targetView": "opportunities" | "training" | "dashboard" | "skill-gap" | "saved" | "profile" | "faq" | "home" | "notifications" | "assessment" | null,
-  "actionHighlight": "opportunities-section" | "roadmap-section" | "training-section" | null,
-  "profileUpdates": {
-    "location": "District, State if mentioned",
-    "name": "Name if mentioned",
-    "education": "Education level if mentioned",
-    "skills": "Skills if mentioned"
-  }
+  "reply": "Clear response in ${langLabel}",
+  "spokenReply": "Clean spoken text without markdown symbols for TTS in ${langLabel}",
+  "targetView": null,
+  "actionHighlight": null,
+  "appAction": null,
+  "actionPayload": null,
+  "profileUpdates": null
 }`;
 
     const rawResult = await generateContentResilient(ai, systemPrompt, {
       responseMimeType: 'application/json',
-      timeoutMs: 8500,
+      timeoutMs: 14000,
     });
     let rawText = rawResult || '{}';
-    rawText = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
+    rawText = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
     const parsed = JSON.parse(rawText);
 
     const cleanedProfileUpdates: Record<string, string> = {};
@@ -659,24 +582,36 @@ Return strictly JSON with NO markdown codeblocks:
     return res.json({
       fallback: false,
       reply: parsed.reply || 'जी, मैं आपकी सहायता के लिए तैयार हूँ।',
+      spokenReply: parsed.spokenReply || parsed.reply || 'जी, मैं आपकी सहायता के लिए तैयार हूँ।',
       targetView: parsed.targetView || null,
       actionHighlight: parsed.actionHighlight || null,
+      appAction: parsed.appAction || null,
+      actionPayload: parsed.actionPayload || null,
       profileUpdates: Object.keys(cleanedProfileUpdates).length > 0 ? cleanedProfileUpdates : null,
     });
-  } catch {
+  } catch (err: any) {
+    console.warn('Gemini /api/chat fallback triggered:', err?.message || 'error');
     return res.json({
       fallback: true,
-      reply: 'जी, मैं आपकी सहायता के लिए तैयार हूँ। आप नौकरी, प्रशिक्षण केंद्र या अपने रोडमैप के बारे में पूछ सकते हैं।',
-      targetView: null,
+      error: 'Voice assistant fallback active',
     });
   }
 });
 
-// API Route: Live AI Location Intelligence & Livelihood Data Generator
+// API Route: Live AI Location Intelligence & Personalized Area Livelihood Generator
 app.post('/api/generate-location-data', async (req: Request, res: Response) => {
+  if (!checkAiRateLimit(req, res)) return;
   try {
-    const { location, district = '', state = '', language = 'hi', existingProfile = {} } = req.body;
-    const targetLoc = location || `${district}, ${state}` || 'Maharajganj, Uttar Pradesh';
+    const location = clampStr(req.body?.location, 160);
+    const district = clampStr(req.body?.district, 80);
+    const state = clampStr(req.body?.state, 80);
+    const locality = clampStr(req.body?.locality, 80);
+    const pincode = clampStr(req.body?.pincode, 12);
+    const language = clampStr(req.body?.language, 8) || 'hi';
+    const existingProfile =
+      req.body?.existingProfile && typeof req.body.existingProfile === 'object' ? req.body.existingProfile : {};
+
+    const targetLoc = location || [locality, district, state].filter(Boolean).join(', ') || 'Maharajganj, Uttar Pradesh';
 
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
@@ -686,36 +621,108 @@ app.post('/api/generate-location-data', async (req: Request, res: Response) => {
       });
     }
 
-    const ai = createAiClient();
-    const prompt = `You are the Live Location Livelihood Data Engine for JeevikaAI in India.
-Target Location: "${targetLoc}" (District: "${district}", State: "${state}")
-Language for text descriptions: ${language === 'bho' ? 'Bhojpuri & Hindi' : language === 'en' ? 'English' : 'Hindi'}
-User Profile Context: ${JSON.stringify(existingProfile)}
+    const safeProfile = {
+      name: clampStr(existingProfile.name, 60),
+      education: clampStr(existingProfile.education, 60),
+      skills: clampStr(existingProfile.skills, 180),
+      interests: clampStr(existingProfile.interests, 180),
+      occupation: clampStr(existingProfile.occupation, 80),
+      workType: clampStr(existingProfile.workType, 40),
+      mobility: clampStr(existingProfile.mobility, 60),
+    };
 
-Generate accurate, realistic, ground-level livelihood intelligence for this Indian location.
-Requirements:
-1. "insight": Economic profile for this district/area:
-   - district, state, economicHub, topSectors (4 items), averageMonthlyWage, activeSchemesCount (6-12), openVacanciesCount (30-95), verifiedCentersCount (3-8), summary
-2. "opportunities": Array of 4 realistic job or self-employment opportunities situated in or near this district (id, title, org, type: "Job" | "Self-employment", loc, km, pay, path: "digital" | "solar" | "tailoring" | "retail", verified: true, source, lastVerifiedDate: "October 2026", eligibility, documentsRequired, contactInfo)
-3. "trainingCenters": Array of 2-3 verified skill centers in this district (id, title, org, type: "Training", loc, km, pay, path, verified: true, source, lastVerifiedDate: "October 2026", eligibility, documentsRequired, contactInfo)
-4. "schemes": Array of 3 active government schemes applicable in this state and district (id, name, hiName, benefit, eligibility, applyOffice, category: "central" | "state" | "toolkit" | "loan", financialSupport)
+    const langLabel =
+      language === 'bho' ? 'Bhojpuri & simple Hindi' : language === 'en' ? 'English' : 'simple Hindi';
+
+    const ai = createAiClient();
+    const prompt = `You are the Live Hyperlocal Livelihood Intelligence Engine for JeevikaAI in India.
+Target Exact Area: "${targetLoc}"
+Locality/Village/Town: "${locality || 'Not specified'}"
+District: "${district || 'Not specified'}"
+State: "${state || 'Not specified'}"
+Pincode: "${pincode || 'Not specified'}"
+Preferred Output Language: ${langLabel}
+Personalized User Profile: ${JSON.stringify(safeProfile)}
+
+CRITICAL ACCURACY RULES:
+1. Every single job, self-employment option, training center, and government scheme MUST be grounded strictly in "${targetLoc}" (${district || targetLoc}, ${state || 'India'}). NEVER return data from another city or state.
+2. Personalize the ranking and relevance to the user's education ("${safeProfile.education || '10th/12th'}"), skills ("${safeProfile.skills || 'General'}"), interests ("${safeProfile.interests || 'Local Livelihood'}"), and workType ("${safeProfile.workType || 'Either'}").
+3. If a village/town/locality is given, mention realistic nearby block/tehsil/market landmarks and accurate distances ("km" integer between 1 and 35).
+4. Include real state-specific schemes for "${state || 'the user state'}" alongside Central schemes (e.g., PM Vishwakarma, PMKVY 4.0, PM Mudra, PMEGP, UP ODOP / Bihar Mukhyamantri Udyami / MP Udyam Kranti / Maharashtra CMEGP / Rajasthan Yuva Sambal, etc. matching the actual state!).
+5. Write descriptions, benefits, eligibility, and summary naturally in ${langLabel}.
 
 Return ONLY valid JSON matching this structure without markdown formatting:
 {
   "district": "${district || 'District'}",
   "state": "${state || 'State'}",
-  "insight": { ... },
-  "opportunities": [ ... ],
-  "trainingCenters": [ ... ],
-  "schemes": [ ... ]
-}`;
+  "insight": {
+    "district": "${district || 'District'}",
+    "state": "${state || 'State'}",
+    "economicHub": "Key local industry / mandi / hub in this district",
+    "topSectors": ["Sector 1", "Sector 2", "Sector 3", "Sector 4"],
+    "averageMonthlyWage": "₹X,XXX - ₹XX,XXX",
+    "activeSchemesCount": 8,
+    "openVacanciesCount": 48,
+    "verifiedCentersCount": 4,
+    "summary": "2-sentence personalized livelihood summary for this exact area in ${langLabel}"
+  },
+  "opportunities": [
+    {
+      "id": "loc-job-1",
+      "title": "Job or Self-Employment Title matched to profile",
+      "org": "Realistic Local Organization / Hub / Cooperative in this district",
+      "type": "Job",
+      "loc": "Specific Locality/Market, District",
+      "km": 4,
+      "pay": "₹10,000 - ₹15,000 / month",
+      "path": "digital",
+      "verified": true,
+      "source": "Local District Registry / Cluster",
+      "lastVerifiedDate": "November 2026",
+      "eligibility": "Clear eligibility",
+      "documentsRequired": ["Aadhaar Card", "Education Certificate", "Bank Passbook"],
+      "contactInfo": "Specific local office/landmark in this district"
+    }
+  ],
+  "trainingCenters": [
+    {
+      "id": "loc-tr-1",
+      "title": "Govt ITI / PMKVY / RSETI Center Name in this district",
+      "org": "Government / Lead Bank Skill Authority",
+      "type": "Training",
+      "loc": "Specific Road/Area, District",
+      "km": 5,
+      "pay": "100% Free Govt Course + Skill India Certificate",
+      "path": "digital",
+      "verified": true,
+      "source": "Skill India / NCVT / MoRD RSETI",
+      "lastVerifiedDate": "November 2026",
+      "eligibility": "Clear eligibility",
+      "documentsRequired": ["Aadhaar Card", "Marksheet"],
+      "contactInfo": "Center address in this district"
+    }
+  ],
+  "schemes": [
+    {
+      "id": "loc-sch-1",
+      "name": "English Scheme Name",
+      "hiName": "Hindi / Local Scheme Name",
+      "benefit": "Concrete financial / toolkit / subsidy benefit",
+      "eligibility": "Who can apply",
+      "applyOffice": "Local DIC / CSC / Block office in this district",
+      "category": "state",
+      "financialSupport": "Key rupee support highlight"
+    }
+  ]
+}
+Include 4 to 5 opportunities (mix of "Job" and "Self-employment", path must be one of "digital", "solar", "tailoring", "retail"), 3 trainingCenters, and 3 schemes.`;
 
     const rawResult = await generateContentResilient(ai, prompt, {
       responseMimeType: 'application/json',
-      timeoutMs: 15000,
+      timeoutMs: 22000,
     });
     let rawText = rawResult || '{}';
-    rawText = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
+    rawText = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
 
     const parsed = JSON.parse(rawText);
     const toStrArray = (v: unknown): string[] => {
@@ -727,14 +734,22 @@ Return ONLY valid JSON matching this structure without markdown formatting:
       parsed.insight.topSectors = toStrArray(parsed.insight.topSectors);
     }
     if (Array.isArray(parsed?.opportunities)) {
-      parsed.opportunities = parsed.opportunities.map((o: any) => ({
+      parsed.opportunities = parsed.opportunities.map((o: any, idx: number) => ({
         ...o,
+        id: clampStr(o?.id, 48) || `ai-job-${Date.now()}-${idx}`,
+        type: o?.type === 'Self-employment' ? 'Self-employment' : 'Job',
+        km: typeof o?.km === 'number' && Number.isFinite(o.km) ? o.km : 5,
+        verified: o?.verified !== false,
         documentsRequired: toStrArray(o?.documentsRequired),
       }));
     }
     if (Array.isArray(parsed?.trainingCenters)) {
-      parsed.trainingCenters = parsed.trainingCenters.map((t: any) => ({
+      parsed.trainingCenters = parsed.trainingCenters.map((t: any, idx: number) => ({
         ...t,
+        id: clampStr(t?.id, 48) || `ai-tr-${Date.now()}-${idx}`,
+        type: 'Training',
+        km: typeof t?.km === 'number' && Number.isFinite(t.km) ? t.km : 6,
+        verified: t?.verified !== false,
         documentsRequired: toStrArray(t?.documentsRequired),
       }));
     }

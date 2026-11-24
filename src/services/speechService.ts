@@ -1,6 +1,7 @@
 import { SupportedLanguage, BeneficiaryProfile, StepOption } from '../types';
 import { EDU, WORK, MOB, SKILL_CHIPS, INTEREST_CHIPS } from '../data/mockData';
 import { voiceVocabularyCache } from './voiceVocabularyCache';
+import { aiGateway } from './aiGateway';
 
 export interface SpeechRecognitionResultWrapper {
   transcript: string;
@@ -699,35 +700,28 @@ class SpeechService {
     }
 
     try {
-      const response = await fetch('/api/extract-profile', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: dedupedMessage,
-          language,
-          currentStep: currentStepKey,
-          existingProfile,
-          stepQuestion,
-        }),
+      const data = await aiGateway.extractProfile({
+        message: dedupedMessage,
+        language,
+        currentStep: currentStepKey,
+        existingProfile,
+        stepQuestion,
       });
 
-      if (response.ok) {
-        const data = await response.json();
-        if (!data.fallback && data.result && data.result.cleanValue) {
-          const cleanedVal = this.deduplicateSpokenText(
-            String(data.result.cleanValue),
-            currentStepKey === 'name'
-          );
-          return {
-            recognizedIntent: data.result.recognizedIntent,
-            cleanValue: cleanedVal || localResult.cleanValue,
-            confidence: typeof data.result.confidence === 'number' ? data.result.confidence : 0.9,
-            needsClarification: false,
-            clarificationQuestion: '',
-            acknowledgment: data.result.acknowledgment || localResult.acknowledgment,
-            suggestedNextTopic: data.result.suggestedNextTopic,
-          };
-        }
+      if (data && !data.fallback && data.result && data.result.cleanValue) {
+        const cleanedVal = this.deduplicateSpokenText(
+          String(data.result.cleanValue),
+          currentStepKey === 'name'
+        );
+        return {
+          recognizedIntent: data.result.recognizedIntent,
+          cleanValue: cleanedVal || localResult.cleanValue,
+          confidence: typeof data.result.confidence === 'number' ? data.result.confidence : 0.9,
+          needsClarification: false,
+          clarificationQuestion: '',
+          acknowledgment: data.result.acknowledgment || localResult.acknowledgment,
+          suggestedNextTopic: data.result.suggestedNextTopic,
+        };
       }
     } catch {
       // Fall through to localResult
@@ -1141,23 +1135,16 @@ class SpeechService {
     const workLabel = this.localizeProfileValue('workType', profile.workType || 'Job', lang);
 
     try {
-      const response = await fetch('/api/generate-readback', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          profile: {
-            ...profile,
-            education: eduLabel,
-            workType: workLabel,
-          },
-          language: lang,
-        }),
+      const data = await aiGateway.generateReadback({
+        profile: {
+          ...profile,
+          education: eduLabel,
+          workType: workLabel,
+        },
+        language: lang,
       });
-      if (response.ok) {
-        const data = await response.json();
-        if (!data.fallback && data.readbackText) {
-          return data.readbackText;
-        }
+      if (data && !data.fallback && data.readbackText) {
+        return data.readbackText;
       }
     } catch {
       // Fallback below

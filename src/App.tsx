@@ -12,6 +12,7 @@ import { storageService } from './services/storageService';
 import { authService, AppUser, firestoreService } from './services/firebase';
 import { locationIntelligenceService } from './services/locationIntelligenceService';
 import { mediaStorageService } from './services/cloudinaryService';
+import { aiGateway } from './services/aiGateway';
 import { Navbar } from './components/Navbar';
 import { Home } from './components/Home';
 import { Assessment } from './components/Assessment';
@@ -296,12 +297,8 @@ export function App() {
 
     try {
       const [profileAnalysisRes, locationDataRes] = await Promise.allSettled([
-        fetch('/api/analyze-profile', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ profile: newProfile, language: currentLang }),
-        }).then((res) => (res.ok ? res.json() : null)),
-        locationIntelligenceService.fetchLocationData(targetLoc, currentLang, newProfile),
+        aiGateway.analyzeProfile({ profile: newProfile, language: currentLang }),
+        locationIntelligenceService.fetchLocationData(targetLoc, currentLang, newProfile, true),
       ]);
 
       if (profileAnalysisRes.status === 'fulfilled' && profileAnalysisRes.value?.analysis) {
@@ -431,8 +428,14 @@ export function App() {
   }, [shortlist, locationData]);
 
   const handleProfileUpdate = async (updated: BeneficiaryProfile) => {
+    const prevProfile = profile;
     setProfile(updated);
     storageService.saveProfile(updated);
+
+    if (updated.location && updated.location.trim() !== activeLocation) {
+      setActiveLocation(updated.location.trim());
+      locationIntelligenceService.setActiveLocation(updated.location.trim());
+    }
 
     try {
       await firestoreService.syncLocalProfileToFirestore(updated);
@@ -440,13 +443,25 @@ export function App() {
       console.error('Error syncing profile change to Firestore:', err);
     }
 
+    const profileChanged =
+      !prevProfile ||
+      prevProfile.location !== updated.location ||
+      prevProfile.skills !== updated.skills ||
+      prevProfile.interests !== updated.interests ||
+      prevProfile.education !== updated.education ||
+      prevProfile.workType !== updated.workType;
+
+    if (profileChanged) {
+      const locToSync = updated.location?.trim() || activeLocation;
+      locationIntelligenceService
+        .fetchLocationData(locToSync, currentLang, updated, true)
+        .then((fresh) => setLocationData(fresh))
+        .catch(() => {});
+    }
+
     try {
-      fetch('/api/analyze-profile', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ profile: updated, language: currentLang }),
-      })
-        .then((res) => (res.ok ? res.json() : null))
+      aiGateway
+        .analyzeProfile({ profile: updated, language: currentLang })
         .then((data) => {
           if (data?.analysis) {
             const enriched = { ...updated, aiAnalysis: data.analysis };
@@ -494,7 +509,7 @@ export function App() {
   const handleRefreshLocationAi = async () => {
     setIsRefreshingLocationData(true);
     try {
-      const fresh = await locationIntelligenceService.fetchLocationData(activeLocation, currentLang, profile);
+      const fresh = await locationIntelligenceService.fetchLocationData(activeLocation, currentLang, profile, true);
       setLocationData(fresh);
       notify(
         currentLang === 'bho'
@@ -927,6 +942,17 @@ export function App() {
           onUpdateProfile={handleProfileUpdate}
           activeLocation={activeLocation}
           onLocationChange={handleLocationChange}
+          onLanguageChange={(lang) => {
+            setCurrentLang(lang);
+            try { localStorage.setItem('jeevika_lang', lang); } catch {}
+          }}
+          onSelectOpportunity={setSelectedOpportunity}
+          onShortlistToggle={handleShortlistToggle}
+          onRefreshLocationAi={handleRefreshLocationAi}
+          onStartAssessment={() => {
+            setAutoStartAssessment(true);
+            navigateTo('assessment');
+          }}
         />
       )}
 
