@@ -54,7 +54,7 @@ export const DEMO: BeneficiaryProfile = {
   skills: 'Basic communication, Hindi typing, mobile phone use',
   interests: 'Digital services, computers, mobile apps',
   occupation: 'Homemaker, helps at a family shop',
-  location: 'Maharajganj, Uttar Pradesh',
+  location: '',
   workType: 'Job',
   mobility: 'Nearby only (within ~10 km)',
   isDemo: true,

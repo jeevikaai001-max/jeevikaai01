@@ -16,6 +16,7 @@ import {
   locationIntelligenceService,
   LocationDetectionResult,
   GpsCoordinates,
+  isCoordinateMatch,
 } from '../services/locationIntelligenceService';
 import {
   mediaStorageService,
@@ -86,7 +87,7 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
 
   const [selectedDistrict, setSelectedDistrict] = useState<string>(initialDistrict);
   const [showDistrictModal, setShowDistrictModal] = useState<boolean>(false);
-  const hasTriggeredMountAiRef = useRef<boolean>(false);
+  const lastSyncedCoordKeyRef = useRef<string>('');
 
   const liveCoords = useMemo<GpsCoordinates | undefined>(() => {
     const gps = locationIntelligenceService.getLiveGpsCoordinates();
@@ -116,14 +117,33 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
     }
   }, [locationData?.district, initialDistrict]);
 
-  // Force an AI-driven refresh anchored to captured GPS coordinates if view opens without live AI data
+  // Force an AI-driven refresh anchored to captured GPS coordinates whenever view opens without live AI data or coordinates drifted (>0.5km)
   useEffect(() => {
-    if (hasTriggeredMountAiRef.current || isRefreshingAi || isDetectingGps) return;
-    if (!locationData?.isAiGenerated && onRefreshAi) {
-      hasTriggeredMountAiRef.current = true;
+    if (isRefreshingAi || isDetectingGps || !onRefreshAi) return;
+    const coordsDrifted = Boolean(
+      liveCoords &&
+        (!locationData ||
+          !isCoordinateMatch(liveCoords.latitude, liveCoords.longitude, locationData.latitude, locationData.longitude, 0.5))
+    );
+    const targetKey = liveCoords
+      ? `${liveCoords.latitude.toFixed(3)},${liveCoords.longitude.toFixed(3)}|${currentLang}`
+      : `${selectedDistrict}|${currentLang}`;
+
+    if ((!locationData?.isAiGenerated || coordsDrifted) && lastSyncedCoordKeyRef.current !== targetKey) {
+      lastSyncedCoordKeyRef.current = targetKey;
       onRefreshAi(liveCoords).catch(() => {});
     }
-  }, [locationData?.isAiGenerated, isRefreshingAi, isDetectingGps, liveCoords, onRefreshAi]);
+  }, [
+    locationData?.isAiGenerated,
+    locationData?.latitude,
+    locationData?.longitude,
+    isRefreshingAi,
+    isDetectingGps,
+    liveCoords,
+    selectedDistrict,
+    currentLang,
+    onRefreshAi,
+  ]);
 
   const handleAutoDetectCurrentLocation = async () => {
     if (isDetectingGps) return;
@@ -167,10 +187,10 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
         handleFirestoreError(err, OperationType.LIST, 'opportunities');
         setFirestoreError(
           currentLang === 'bho'
-            ? 'फ़ायरबेस से लाइव संपर्क धीमा बा, स्थानीय सुरक्षित डेटा देखावल जात बा।'
+            ? 'फ़ायरबेस से लाइव संपर्क धीमा बा, लाइव AI GPS अवसर देखावल जात बा।'
             : currentLang === 'en'
-            ? 'Live Firestore sync slow or offline; serving verified local catalog.'
-            : 'फ़ायरबेस से लाइव संपर्क धीमा है, स्थानीय प्रमाणित डेटा दिखाया जा रहा है।'
+            ? 'Live Firestore sync slow; showing live AI GPS opportunities.'
+            : 'फ़ायरबेस से लाइव संपर्क धीमा है, आपके GPS स्थान के लाइव AI अवसर दिखाए जा रहे हैं।'
         );
       }
     );
@@ -399,7 +419,10 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
             {onRefreshAi && (
               <button
                 type="button"
-                onClick={() => onRefreshAi(liveCoords)}
+                onClick={() => {
+                  lastSyncedCoordKeyRef.current = '';
+                  onRefreshAi(liveCoords);
+                }}
                 disabled={isRefreshingAi}
                 className="min-h-[40px] px-3.5 py-2 rounded-xl border border-[#DCE3EA] bg-white text-xs font-bold text-[#245A91] hover:bg-[#F7F9FC] transition-colors flex items-center gap-1.5 disabled:opacity-60"
               >

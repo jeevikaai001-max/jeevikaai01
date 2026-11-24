@@ -11,15 +11,16 @@ import {
 import { storageService } from './storageService';
 import { aiGateway } from './aiGateway';
 
-// Storage keys (v4 drops all legacy curated/demo/offline Maharajganj caches)
-const LOCATION_DATA_CACHE_KEY = 'jeevika_location_livelihood_cache_v4';
+// Storage keys (v5 strictly prioritizes live GPS coordinates and purges all legacy caches)
+const LOCATION_DATA_CACHE_KEY = 'jeevika_location_livelihood_cache_v5';
 const LEGACY_CACHE_KEYS = [
   'jeevika_location_livelihood_cache_v1',
   'jeevika_location_livelihood_cache_v2',
   'jeevika_location_livelihood_cache_v3',
+  'jeevika_location_livelihood_cache_v4',
 ];
-const ACTIVE_LOCATION_KEY = 'jeevika_active_location_v4';
-const ACCURACY_STORAGE_KEY = 'jeevika_location_accuracy_v4';
+const ACTIVE_LOCATION_KEY = 'jeevika_active_location_v5';
+const ACCURACY_STORAGE_KEY = 'jeevika_location_accuracy_v5';
 
 export const DEFAULT_SCHEME_IMAGE = '';
 
@@ -400,12 +401,38 @@ export function getNearestDistrict(lat: number, lng: number): { district: string
   return { district: bestDistrict, state: bestState };
 }
 
+export function isCoordinateMatch(
+  lat1?: number,
+  lng1?: number,
+  lat2?: number,
+  lng2?: number,
+  thresholdKm = 0.5
+): boolean {
+  if (
+    typeof lat1 !== 'number' ||
+    typeof lng1 !== 'number' ||
+    typeof lat2 !== 'number' ||
+    typeof lng2 !== 'number' ||
+    !isValidCoordinatePair(lat1, lng1) ||
+    !isValidCoordinatePair(lat2, lng2)
+  ) {
+    return false;
+  }
+  return haversineDistanceKm(lat1, lng1, lat2, lng2) <= thresholdKm;
+}
+
 class LocationIntelligenceService {
   private activeLocation: string = '';
   private cachedData: LocationLivelihoodData | null = null;
   private currentAccuracy: LocationAccuracyInfo | null = null;
-  /** Strictly prioritized live GPS coordinates captured during this session */
+  /** Strictly prioritized live GPS coordinates captured during this active session */
   private liveGpsCoords: GpsCoordinates | null = null;
+  /** Reverse-geocoded metadata tied specifically to the most recent GPS fix */
+  private lastResolvedGps: LocationDetectionResult | null = null;
+  /** Tracks whether the user explicitly chose a manual district in this session */
+  private manualOverrideActive = false;
+  /** Sequence guard so stale/slower responses never overwrite a newer GPS/AI fetch */
+  private fetchSeq = 0;
   private listeners: ((data: LocationLivelihoodData) => void)[] = [];
   private inFlightRequests = new Map<string, Promise<LocationLivelihoodData>>();
 
@@ -421,10 +448,16 @@ class LocationIntelligenceService {
           localStorage.removeItem(k);
         } catch {}
       });
-      try {
-        localStorage.removeItem('jeevika_active_location_v2');
-        localStorage.removeItem('jeevika_location_accuracy_v2');
-      } catch {}
+      [
+        'jeevika_active_location_v2',
+        'jeevika_location_accuracy_v2',
+        'jeevika_active_location_v4',
+        'jeevika_location_accuracy_v4',
+      ].forEach((k) => {
+        try {
+          localStorage.removeItem(k);
+        } catch {}
+      });
 
       const savedLoc = localStorage.getItem(ACTIVE_LOCATION_KEY);
       if (savedLoc && savedLoc.trim()) {
@@ -435,13 +468,19 @@ class LocationIntelligenceService {
       if (savedAcc) {
         const parsedAcc = JSON.parse(savedAcc) as LocationAccuracyInfo;
         if (parsedAcc && isValidCoordinatePair(parsedAcc.latitude, parsedAcc.longitude)) {
-          this.currentAccuracy = parsedAcc;
+          // Persisted accuracy from previous sessions is strictly marked as cache, NEVER live session GPS
+          this.currentAccuracy = {
+            ...parsedAcc,
+            source: parsedAcc.source === 'manual' ? 'manual' : 'cache',
+          };
         }
       }
 
-      // Only restore cached data if it is genuinely AI-generated and has valid coordinates
+      // Only hydrate persisted AI cache automatically when strictly offline;
+      // when online, fresh GPS + live AI refresh always takes precedence.
+      const isOfflineNow = typeof navigator !== 'undefined' && navigator.onLine === false;
       const cached = localStorage.getItem(LOCATION_DATA_CACHE_KEY);
-      if (cached) {
+      if (cached && isOfflineNow) {
         const parsed = JSON.parse(cached) as LocationLivelihoodData;
         const hasLegacyOfflineDemo =
           Array.isArray(parsed?.opportunities) &&
@@ -473,25 +512,23 @@ class LocationIntelligenceService {
     return this.activeLocation;
   }
 
+  /**
+   * Returns ONLY live GPS coordinates captured during this active session.
+   * Never mistakes stale persisted localStorage entries for live GPS coordinates.
+   */
   public getLiveGpsCoordinates(): GpsCoordinates | null {
     if (this.liveGpsCoords && isValidCoordinatePair(this.liveGpsCoords.latitude, this.liveGpsCoords.longitude)) {
       return this.liveGpsCoords;
-    }
-    if (
-      this.currentAccuracy?.source === 'gps' &&
-      isValidCoordinatePair(this.currentAccuracy.latitude, this.currentAccuracy.longitude)
-    ) {
-      return {
-        latitude: this.currentAccuracy.latitude!,
-        longitude: this.currentAccuracy.longitude!,
-        accuracyMeters: this.currentAccuracy.accuracyMeters,
-      };
     }
     return null;
   }
 
   public hasLiveGpsCoordinates(): boolean {
     return this.getLiveGpsCoordinates() !== null;
+  }
+
+  public isManualOverrideActive(): boolean {
+    return this.manualOverrideActive;
   }
 
   public setActiveLocation(loc: string, accuracyInfo?: LocationAccuracyInfo): void {
@@ -506,6 +543,7 @@ class LocationIntelligenceService {
           accuracyInfo.source === 'gps' &&
           isValidCoordinatePair(accuracyInfo.latitude, accuracyInfo.longitude)
         ) {
+          this.manualOverrideActive = false;
           this.liveGpsCoords = {
             latitude: accuracyInfo.latitude!,
             longitude: accuracyInfo.longitude!,
@@ -513,8 +551,9 @@ class LocationIntelligenceService {
             capturedAt: Date.now(),
           };
         } else if (accuracyInfo.source === 'manual') {
-          // User explicitly overrode location manually; clear session GPS lock until next GPS sync
+          this.manualOverrideActive = true;
           this.liveGpsCoords = null;
+          this.lastResolvedGps = null;
         }
       }
     } catch {
@@ -523,7 +562,7 @@ class LocationIntelligenceService {
   }
 
   public getLocationAccuracy(): LocationAccuracyInfo {
-    // 1. Live GPS coordinates always take strict priority
+    // 1. Live session GPS coordinates always take strict priority
     if (this.liveGpsCoords && isValidCoordinatePair(this.liveGpsCoords.latitude, this.liveGpsCoords.longitude)) {
       const base = this.currentAccuracy;
       return {
@@ -532,16 +571,17 @@ class LocationIntelligenceService {
         accuracyMeters: this.liveGpsCoords.accuracyMeters ?? base?.accuracyMeters,
         latitude: this.liveGpsCoords.latitude,
         longitude: this.liveGpsCoords.longitude,
-        locality: base?.locality,
-        pincode: base?.pincode,
+        locality: this.lastResolvedGps?.locality || base?.locality,
+        pincode: this.lastResolvedGps?.pincode || base?.pincode,
         source: 'gps',
         description:
+          this.lastResolvedGps?.description ||
           base?.description ||
           `सटीक जीपीएस स्थान (${this.liveGpsCoords.latitude.toFixed(4)}, ${this.liveGpsCoords.longitude.toFixed(4)})`,
       };
     }
 
-    // 2. Stored accuracy info (if present and valid)
+    // 2. Stored manual accuracy info (if present and valid)
     if (this.currentAccuracy && isValidCoordinatePair(this.currentAccuracy.latitude, this.currentAccuracy.longitude)) {
       return this.currentAccuracy;
     }
@@ -563,12 +603,17 @@ class LocationIntelligenceService {
   public setLocationAccuracy(info: LocationAccuracyInfo): void {
     this.currentAccuracy = info;
     if (info.source === 'gps' && isValidCoordinatePair(info.latitude, info.longitude)) {
+      this.manualOverrideActive = false;
       this.liveGpsCoords = {
         latitude: info.latitude!,
         longitude: info.longitude!,
         accuracyMeters: info.accuracyMeters,
         capturedAt: Date.now(),
       };
+    } else if (info.source === 'manual') {
+      this.manualOverrideActive = true;
+      this.liveGpsCoords = null;
+      this.lastResolvedGps = null;
     }
     try {
       localStorage.setItem(ACCURACY_STORAGE_KEY, JSON.stringify(info));
@@ -588,13 +633,17 @@ class LocationIntelligenceService {
       longitude: coords.lng,
       description: `मैनुअल चयन: ${districtName} (${stateName})`,
     };
+    this.manualOverrideActive = true;
     this.liveGpsCoords = null;
+    this.lastResolvedGps = null;
+    this.clearCachedData();
     this.setActiveLocation(fullLoc, info);
     return info;
   }
 
   /**
-   * Returns cached data ONLY if it is live AI-generated AND matches the current GPS coordinates / location.
+   * Returns cached data ONLY if it is live AI-generated AND strictly matches current
+   * live GPS coordinates (within 0.5 km) or active manual district.
    * Never returns hardcoded or demo fallback datasets.
    */
   public getCachedData(locationOverride?: string): LocationLivelihoodData | null {
@@ -602,22 +651,19 @@ class LocationIntelligenceService {
       return null;
     }
 
-    // If live GPS coordinates are present, verify cached data is within 2 km of current GPS fix
+    // If live session GPS coordinates exist, cached data MUST be within 0.5 km of the GPS fix
     const gps = this.getLiveGpsCoordinates();
     if (gps) {
-      if (!isValidCoordinatePair(this.cachedData.latitude, this.cachedData.longitude)) {
-        return null;
-      }
-      const distKm = haversineDistanceKm(
-        gps.latitude,
-        gps.longitude,
-        this.cachedData.latitude!,
-        this.cachedData.longitude!
-      );
-      if (distKm > 2) {
+      if (!isCoordinateMatch(gps.latitude, gps.longitude, this.cachedData.latitude, this.cachedData.longitude, 0.5)) {
         return null;
       }
       return this.cachedData;
+    }
+
+    // When online without a live session GPS fix or manual override, do not return stale cached data
+    const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+    if (isOnline && !this.manualOverrideActive) {
+      return null;
     }
 
     const loc = (locationOverride && locationOverride.trim()) || this.activeLocation;
@@ -640,8 +686,9 @@ class LocationIntelligenceService {
 
   public subscribe(cb: (data: LocationLivelihoodData) => void): () => void {
     this.listeners.push(cb);
-    if (this.cachedData && this.cachedData.isAiGenerated) {
-      cb(this.cachedData);
+    const validCached = this.getCachedData();
+    if (validCached) {
+      cb(validCached);
     }
     return () => {
       this.listeners = this.listeners.filter((l) => l !== cb);
@@ -810,15 +857,7 @@ class LocationIntelligenceService {
       description,
     };
 
-    this.liveGpsCoords = {
-      latitude,
-      longitude,
-      accuracyMeters,
-      capturedAt: Date.now(),
-    };
-    this.setActiveLocation(fullLoc, accuracyInfo);
-
-    return {
+    const result: LocationDetectionResult = {
       location: fullLoc,
       district: cleanDistrict,
       state,
@@ -832,11 +871,31 @@ class LocationIntelligenceService {
       source: 'gps',
       description,
     };
+
+    // If coordinates moved > 0.5 km from any cached dataset, purge stale cache immediately
+    if (
+      this.cachedData &&
+      !isCoordinateMatch(latitude, longitude, this.cachedData.latitude, this.cachedData.longitude, 0.5)
+    ) {
+      this.clearCachedData();
+    }
+
+    this.manualOverrideActive = false;
+    this.liveGpsCoords = {
+      latitude,
+      longitude,
+      accuracyMeters,
+      capturedAt: Date.now(),
+    };
+    this.lastResolvedGps = result;
+    this.setActiveLocation(fullLoc, accuracyInfo);
+
+    return result;
   }
 
   /**
    * Forces live AI-driven livelihood data generation strictly anchored to GPS coordinates
-   * (when available) or explicit user-selected area. Eliminates demo/placeholder datasets.
+   * (when available) or explicit user-selected area. Eliminates cached/demo/placeholder leaks.
    */
   public async fetchLocationData(
     targetLocation?: string,
@@ -845,33 +904,36 @@ class LocationIntelligenceService {
     forceRefresh = false,
     coordsOverride?: GpsCoordinates | null
   ): Promise<LocationLivelihoodData> {
-    // 1. Strictly prioritize GPS coordinates over cached/string locations
+    const seq = ++this.fetchSeq;
+
+    // 1. Strictly prioritize live GPS coordinates over any cached location string
     let effectiveCoords: GpsCoordinates | null = null;
     let coordinateSource: 'gps' | 'manual' | 'cache' | 'default' = 'manual';
 
     if (coordsOverride && isValidCoordinatePair(coordsOverride.latitude, coordsOverride.longitude)) {
       effectiveCoords = coordsOverride;
       coordinateSource = 'gps';
+      this.manualOverrideActive = false;
       this.liveGpsCoords = {
         latitude: coordsOverride.latitude,
         longitude: coordsOverride.longitude,
         accuracyMeters: coordsOverride.accuracyMeters,
         capturedAt: Date.now(),
       };
-    } else if (this.liveGpsCoords && isValidCoordinatePair(this.liveGpsCoords.latitude, this.liveGpsCoords.longitude)) {
+    } else if (
+      !this.manualOverrideActive &&
+      this.liveGpsCoords &&
+      isValidCoordinatePair(this.liveGpsCoords.latitude, this.liveGpsCoords.longitude)
+    ) {
       effectiveCoords = this.liveGpsCoords;
       coordinateSource = 'gps';
     } else if (
-      this.currentAccuracy?.source === 'gps' &&
-      isValidCoordinatePair(this.currentAccuracy.latitude, this.currentAccuracy.longitude)
+      !this.manualOverrideActive &&
+      isValidCoordinatePair(userProfile?.latitude, userProfile?.longitude) &&
+      (!targetLocation ||
+        !targetLocation.trim() ||
+        normalizeDistrictKey(targetLocation) === normalizeDistrictKey(userProfile?.location || ''))
     ) {
-      effectiveCoords = {
-        latitude: this.currentAccuracy.latitude!,
-        longitude: this.currentAccuracy.longitude!,
-        accuracyMeters: this.currentAccuracy.accuracyMeters,
-      };
-      coordinateSource = 'gps';
-    } else if (isValidCoordinatePair(userProfile?.latitude, userProfile?.longitude)) {
       effectiveCoords = {
         latitude: userProfile!.latitude!,
         longitude: userProfile!.longitude!,
@@ -880,49 +942,93 @@ class LocationIntelligenceService {
       coordinateSource = 'gps';
     }
 
-    let loc = (targetLocation || this.activeLocation || '').trim();
-    if (!loc && effectiveCoords) {
-      const resolved = await this.resolveLocationFromCoordinates(
-        effectiveCoords.latitude,
-        effectiveCoords.longitude,
-        effectiveCoords.accuracyMeters || 45
-      );
-      loc = resolved.location;
+    // 2. When GPS coordinates exist, ALWAYS derive location metadata strictly from those coordinates
+    //    (NEVER allow a stale cached activeLocation or stale targetLocation string to override GPS!)
+    let loc = '';
+    let locality = '';
+    let district = '';
+    let state = '';
+    let pincode = '';
+
+    if (coordinateSource === 'gps' && effectiveCoords) {
+      let resolvedMeta: LocationDetectionResult;
+      if (
+        this.lastResolvedGps &&
+        isCoordinateMatch(
+          effectiveCoords.latitude,
+          effectiveCoords.longitude,
+          this.lastResolvedGps.latitude,
+          this.lastResolvedGps.longitude,
+          0.3
+        )
+      ) {
+        resolvedMeta = this.lastResolvedGps;
+      } else {
+        resolvedMeta = await this.resolveLocationFromCoordinates(
+          effectiveCoords.latitude,
+          effectiveCoords.longitude,
+          effectiveCoords.accuracyMeters || 45
+        );
+      }
+
+      loc = resolvedMeta.location;
+      locality = resolvedMeta.locality || '';
+      district = resolvedMeta.district;
+      state = resolvedMeta.state;
+      pincode = resolvedMeta.pincode || '';
+    } else {
+      // Manual district selection or fallback when GPS permission was denied/unavailable
+      loc = (targetLocation || this.activeLocation || '').trim();
+      if (loc) {
+        this.setActiveLocation(loc);
+      }
+      const parsedParts = parseLocationParts(loc);
+      const accuracy = this.getLocationAccuracy();
+      locality = parsedParts.locality || accuracy.locality || '';
+      district = parsedParts.district || '';
+      state = parsedParts.state || '';
+      pincode = accuracy.pincode || '';
+
+      if (district) {
+        const manualCoords = getDistrictCoordinates(district);
+        effectiveCoords = { latitude: manualCoords.lat, longitude: manualCoords.lng };
+        coordinateSource = 'manual';
+      }
     }
 
-    if (loc) {
-      this.setActiveLocation(loc);
-    }
-
-    const parsedParts = parseLocationParts(loc);
     const accuracy = this.getLocationAccuracy();
-    const locality = parsedParts.locality || accuracy.locality || '';
-    const district = parsedParts.district || (effectiveCoords ? getNearestDistrict(effectiveCoords.latitude, effectiveCoords.longitude).district : '');
-    const state = parsedParts.state || (effectiveCoords ? getNearestDistrict(effectiveCoords.latitude, effectiveCoords.longitude).state : '');
-    const pincode = accuracy.pincode || '';
     const requestedDistrictKey = normalizeDistrictKey(district);
-
-    // If no GPS coordinates exist at all, derive district coordinates ONLY for manual district selection
-    if (!effectiveCoords && district) {
-      const manualCoords = getDistrictCoordinates(district);
-      effectiveCoords = { latitude: manualCoords.lat, longitude: manualCoords.lng };
-      coordinateSource = 'manual';
-    }
-
     const resolvedLat = effectiveCoords?.latitude;
     const resolvedLng = effectiveCoords?.longitude;
 
-    // Only reuse in-memory live AI data if NOT forceRefresh AND coordinates/district match closely
-    if (!forceRefresh && this.cachedData && this.cachedData.isAiGenerated) {
-      const sameCoords =
+    // 3. Purge stale cache immediately if forcing refresh or if coordinates diverged (> 0.5 km)
+    if (
+      forceRefresh ||
+      (this.cachedData &&
         isValidCoordinatePair(resolvedLat, resolvedLng) &&
-        isValidCoordinatePair(this.cachedData.latitude, this.cachedData.longitude) &&
-        haversineDistanceKm(resolvedLat!, resolvedLng!, this.cachedData.latitude!, this.cachedData.longitude!) <= 1.5;
+        !isCoordinateMatch(resolvedLat, resolvedLng, this.cachedData.latitude, this.cachedData.longitude, 0.5))
+    ) {
+      this.clearCachedData();
+    }
+
+    // Only reuse live AI data if NOT forceRefresh AND coordinates match within 0.5 km AND data is populated
+    if (!forceRefresh && this.cachedData && this.cachedData.isAiGenerated) {
+      const sameCoords = isCoordinateMatch(
+        resolvedLat,
+        resolvedLng,
+        this.cachedData.latitude,
+        this.cachedData.longitude,
+        0.5
+      );
       const sameDistrict =
         requestedDistrictKey &&
         normalizeDistrictKey(this.cachedData.district || this.cachedData.location || '') === requestedDistrictKey;
 
-      if (sameCoords && sameDistrict && this.cachedData.opportunities.length > 0) {
+      if (
+        sameCoords &&
+        sameDistrict &&
+        (this.cachedData.opportunities.length > 0 || this.cachedData.trainingCenters.length > 0)
+      ) {
         return this.cachedData;
       }
     }
@@ -945,7 +1051,11 @@ class LocationIntelligenceService {
     const runFetch = async (): Promise<LocationLivelihoodData> => {
       const attemptAiFetch = async (): Promise<LocationLivelihoodData | null> => {
         const payload = await aiGateway.generateLocationData({
-          location: loc || (isValidCoordinatePair(resolvedLat, resolvedLng) ? `${resolvedLat!.toFixed(5)}, ${resolvedLng!.toFixed(5)}` : 'India'),
+          location:
+            loc ||
+            (isValidCoordinatePair(resolvedLat, resolvedLng)
+              ? `${resolvedLat!.toFixed(5)}, ${resolvedLng!.toFixed(5)}`
+              : 'India'),
           district,
           state,
           locality,
@@ -995,14 +1105,16 @@ class LocationIntelligenceService {
             path: String(o?.path || 'digital').trim(),
             verified: o?.verified !== false,
             source: String(o?.source || 'Live AI Location Intelligence').trim(),
-            lastVerifiedDate: String(o?.lastVerifiedDate || new Date().toLocaleDateString('en-IN', { month: 'long', year: 'numeric' })),
+            lastVerifiedDate: String(
+              o?.lastVerifiedDate || new Date().toLocaleDateString('en-IN', { month: 'long', year: 'numeric' })
+            ),
             eligibility: String(o?.eligibility || '').trim(),
             documentsRequired: toStringArray(o?.documentsRequired),
             contactInfo: o?.contactInfo ? String(o.contactInfo).trim() : undefined,
           });
 
-          const resolvedDistrict = rawReturnedDistrict || district;
-          const resolvedState = String(payload.result.state || '').trim() || state;
+          const resolvedDistrict = district || rawReturnedDistrict;
+          const resolvedState = state || String(payload.result.state || '').trim();
           const displayLocation =
             loc || [locality, resolvedDistrict, resolvedState].filter(Boolean).join(', ');
 
@@ -1019,10 +1131,14 @@ class LocationIntelligenceService {
           };
 
           const opportunities = Array.isArray(payload.result.opportunities)
-            ? payload.result.opportunities.map((o: any, i: number) => normalizeOpp(o, i, 'job')).filter((o: Opportunity) => Boolean(o.title))
+            ? payload.result.opportunities
+                .map((o: any, i: number) => normalizeOpp(o, i, 'job'))
+                .filter((o: Opportunity) => Boolean(o.title))
             : [];
           const trainingCenters = Array.isArray(payload.result.trainingCenters)
-            ? payload.result.trainingCenters.map((t: any, i: number) => normalizeOpp(t, i, 'tr')).filter((t: Opportunity) => Boolean(t.title))
+            ? payload.result.trainingCenters
+                .map((t: any, i: number) => normalizeOpp(t, i, 'tr'))
+                .filter((t: Opportunity) => Boolean(t.title))
             : [];
           const schemes: GovernmentScheme[] = Array.isArray(payload.result.schemes)
             ? payload.result.schemes.filter((s: any) => Boolean(s && (s.name || s.hiName)))
@@ -1053,7 +1169,9 @@ class LocationIntelligenceService {
             schemes,
           };
 
-          this.notify(liveData);
+          if (seq === this.fetchSeq) {
+            this.notify(liveData);
+          }
           return liveData;
         }
         return null;
@@ -1077,7 +1195,11 @@ class LocationIntelligenceService {
 
       // Strictly NO demo / curated Maharajganj placeholder data when AI is unreachable
       const emptyLiveState: LocationLivelihoodData = {
-        location: loc || (isValidCoordinatePair(resolvedLat, resolvedLng) ? `${resolvedLat!.toFixed(4)}, ${resolvedLng!.toFixed(4)}` : ''),
+        location:
+          loc ||
+          (isValidCoordinatePair(resolvedLat, resolvedLng)
+            ? `${resolvedLat!.toFixed(4)}, ${resolvedLng!.toFixed(4)}`
+            : ''),
         district,
         state,
         isAiGenerated: false,
@@ -1102,7 +1224,9 @@ class LocationIntelligenceService {
         trainingCenters: [],
         schemes: [],
       };
-      this.notify(emptyLiveState);
+      if (seq === this.fetchSeq) {
+        this.notify(emptyLiveState);
+      }
       return emptyLiveState;
     };
 
@@ -1143,9 +1267,7 @@ class LocationIntelligenceService {
               source: 'gps',
               description: `जीपीएस निर्देशांक (${latitude.toFixed(4)}, ${longitude.toFixed(4)} · ±${accuracyMeters}m)`,
             };
-            this.liveGpsCoords = { latitude, longitude, accuracyMeters, capturedAt: Date.now() };
-            this.setActiveLocation(fallbackLabel, accuracyInfo);
-            resolve({
+            const fallbackResult: LocationDetectionResult = {
               location: fallbackLabel,
               district: nearest.district,
               state: nearest.state,
@@ -1156,7 +1278,18 @@ class LocationIntelligenceService {
               longitude,
               source: 'gps',
               description: accuracyInfo.description || '',
-            });
+            };
+            if (
+              this.cachedData &&
+              !isCoordinateMatch(latitude, longitude, this.cachedData.latitude, this.cachedData.longitude, 0.5)
+            ) {
+              this.clearCachedData();
+            }
+            this.manualOverrideActive = false;
+            this.liveGpsCoords = { latitude, longitude, accuracyMeters, capturedAt: Date.now() };
+            this.lastResolvedGps = fallbackResult;
+            this.setActiveLocation(fallbackLabel, accuracyInfo);
+            resolve(fallbackResult);
           }
         },
         (error) => {

@@ -7,13 +7,14 @@ import {
   SummaryModalData,
   LocationLivelihoodData,
 } from './types';
-import { DEMO, JOBS } from './data/mockData';
+import { DEMO } from './data/mockData';
 import { storageService } from './services/storageService';
 import { authService, AppUser, firestoreService } from './services/firebase';
 import {
   locationIntelligenceService,
   LocationDetectionResult,
   GpsCoordinates,
+  isCoordinateMatch,
 } from './services/locationIntelligenceService';
 import { mediaStorageService } from './services/cloudinaryService';
 import { aiGateway } from './services/aiGateway';
@@ -93,8 +94,7 @@ export function App() {
     return storageService.loadProfile()?.location || locationIntelligenceService.getActiveLocation() || '';
   });
   const [locationData, setLocationData] = useState<LocationLivelihoodData | null>(() => {
-    const initialProfileLoc = storageService.loadProfile()?.location;
-    return locationIntelligenceService.getCachedData(initialProfileLoc);
+    return locationIntelligenceService.getCachedData();
   });
   const [isRefreshingLocationData, setIsRefreshingLocationData] = useState<boolean>(false);
   const [isOffline, setIsOffline] = useState<boolean>(() => typeof navigator !== 'undefined' && !navigator.onLine);
@@ -105,6 +105,8 @@ export function App() {
   const pendingSectionRef = useRef<string | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasAutoDetectedGpsRef = useRef<boolean>(false);
+  const locationFetchSeqRef = useRef<number>(0);
+  const lastSyncedLangRef = useRef<SupportedLanguage>(currentLang);
 
   useEffect(() => {
     try {
@@ -150,45 +152,43 @@ export function App() {
     const unsub = locationIntelligenceService.subscribe((data) => {
       if (active) setLocationData(data);
     });
-    const liveCoords = locationIntelligenceService.getLiveGpsCoordinates();
-    const locToFetch = profile?.location?.trim() || activeLocation;
-    if (profile?.location && profile.location.trim() !== activeLocation) {
-      setActiveLocation(profile.location.trim());
-    }
-    if (liveCoords || locToFetch) {
-      setIsRefreshingLocationData(true);
-      locationIntelligenceService
-        .fetchLocationData(locToFetch || undefined, currentLang, profile, Boolean(liveCoords), liveCoords)
-        .finally(() => {
-          if (active) setIsRefreshingLocationData(false);
-        });
-    }
     return () => {
       active = false;
       unsub();
     };
-  }, [profile?.location, activeLocation, currentLang]);
+  }, []);
 
+  // Deterministic GPS-first live AI sync whenever entering location-aware views or changing language
   useEffect(() => {
-    if (hasAutoDetectedGpsRef.current) {
-      return;
-    }
+    const isLocationAwareView = ['dashboard', 'opportunities', 'training', 'skill-gap', 'saved'].includes(currentView);
+    if (!isLocationAwareView) return;
 
-    if (['dashboard', 'opportunities', 'training', 'skill-gap', 'saved'].includes(currentView)) {
-      hasAutoDetectedGpsRef.current = true;
-      setIsRefreshingLocationData(true);
-      locationIntelligenceService
-        .detectGpsLocation()
-        .then(async (detected) => {
+    let cancelled = false;
+    const seq = ++locationFetchSeqRef.current;
+
+    const runGpsFirstSync = async () => {
+      const manualActive = locationIntelligenceService.isManualOverrideActive();
+      let liveCoords = locationIntelligenceService.getLiveGpsCoordinates();
+      let targetLoc = activeLocation || profile?.location?.trim() || '';
+      let nextProfile: BeneficiaryProfile | null = profile;
+
+      // Step 1: Strictly prioritize fresh GPS capture before touching cached location strings
+      if (!liveCoords && !manualActive && !hasAutoDetectedGpsRef.current) {
+        hasAutoDetectedGpsRef.current = true;
+        setIsRefreshingLocationData(true);
+        try {
+          const detected = await locationIntelligenceService.detectGpsLocation();
+          if (cancelled || seq !== locationFetchSeqRef.current) return;
           if (detected && typeof detected.latitude === 'number' && typeof detected.longitude === 'number') {
-            const coords: GpsCoordinates = {
+            liveCoords = {
               latitude: detected.latitude,
               longitude: detected.longitude,
               accuracyMeters: detected.accuracyMeters,
+              capturedAt: Date.now(),
             };
+            targetLoc = detected.location;
             setActiveLocation(detected.location);
-            locationIntelligenceService.setActiveLocation(detected.location);
-            let nextProfile: BeneficiaryProfile | null = profile;
+
             if (profile) {
               nextProfile = {
                 ...profile,
@@ -203,24 +203,79 @@ export function App() {
               storageService.saveProfile(nextProfile);
               firestoreService.syncLocalProfileToFirestore(nextProfile).catch(() => {});
             }
+
+            setLocationData((prev) =>
+              prev && isCoordinateMatch(liveCoords!.latitude, liveCoords!.longitude, prev.latitude, prev.longitude, 0.5)
+                ? prev
+                : null
+            );
+
             const fresh = await locationIntelligenceService.fetchLocationData(
               detected.location,
               currentLang,
               nextProfile,
               true,
-              coords
+              liveCoords
             );
-            setLocationData(fresh);
+            if (!cancelled && seq === locationFetchSeqRef.current) {
+              lastSyncedLangRef.current = currentLang;
+              setLocationData(fresh);
+            }
+            return;
           }
-        })
-        .catch(() => {
-          // Permission denied or unavailable; allow manual district or retry
-        })
-        .finally(() => {
-          setIsRefreshingLocationData(false);
-        });
-    }
-  }, [currentView]);
+        } catch {
+          // GPS denied or unavailable; fall through cleanly to active/profile location below
+        } finally {
+          if (!cancelled && seq === locationFetchSeqRef.current) {
+            setIsRefreshingLocationData(false);
+          }
+        }
+      }
+
+      if (cancelled || seq !== locationFetchSeqRef.current) return;
+
+      // Step 2: Force AI refresh if current locationData is missing, not AI-generated,
+      // language changed, or drifted > 0.5 km from captured live GPS coordinates
+      const coordsDrifted = Boolean(
+        liveCoords &&
+          (!locationData ||
+            !isCoordinateMatch(liveCoords.latitude, liveCoords.longitude, locationData.latitude, locationData.longitude, 0.5))
+      );
+      const langChanged = lastSyncedLangRef.current !== currentLang;
+      const needsAiRefresh = !locationData || !locationData.isAiGenerated || coordsDrifted || langChanged;
+
+      if (needsAiRefresh && (liveCoords || targetLoc)) {
+        setIsRefreshingLocationData(true);
+        try {
+          const fresh = await locationIntelligenceService.fetchLocationData(
+            liveCoords ? undefined : targetLoc || undefined,
+            currentLang,
+            nextProfile,
+            true,
+            liveCoords
+          );
+          if (!cancelled && seq === locationFetchSeqRef.current) {
+            lastSyncedLangRef.current = currentLang;
+            setLocationData(fresh);
+            if (fresh.location) {
+              setActiveLocation(fresh.location);
+            }
+          }
+        } catch {
+          // Handled inside service
+        } finally {
+          if (!cancelled && seq === locationFetchSeqRef.current) {
+            setIsRefreshingLocationData(false);
+          }
+        }
+      }
+    };
+
+    runGpsFirstSync();
+    return () => {
+      cancelled = true;
+    };
+  }, [currentView, currentLang]);
 
   useEffect(() => {
     mediaStorageService.syncLocalMediaToFirestore();
@@ -461,8 +516,7 @@ export function App() {
         const resolved =
           item ||
           locationData?.opportunities?.find((o) => o.id === id) ||
-          locationData?.trainingCenters?.find((t) => t.id === id) ||
-          JOBS.find((j) => j.id === id);
+          locationData?.trainingCenters?.find((t) => t.id === id);
         if (resolved) {
           nextItems[id] = resolved;
         }
@@ -498,8 +552,7 @@ export function App() {
         if (!next[id]) {
           const found =
             locationData?.opportunities?.find((o) => o.id === id) ||
-            locationData?.trainingCenters?.find((t) => t.id === id) ||
-            JOBS.find((j) => j.id === id);
+            locationData?.trainingCenters?.find((t) => t.id === id);
           if (found) {
             next[id] = found;
             changed = true;
@@ -539,11 +592,31 @@ export function App() {
       prevProfile.workType !== updated.workType;
 
     if (profileChanged) {
+      const liveCoords =
+        typeof updated.latitude === 'number' && typeof updated.longitude === 'number'
+          ? {
+              latitude: updated.latitude,
+              longitude: updated.longitude,
+              accuracyMeters: updated.locationAccuracyMeters,
+            }
+          : locationIntelligenceService.getLiveGpsCoordinates();
       const locToSync = updated.location?.trim() || activeLocation;
+      const seq = ++locationFetchSeqRef.current;
+      setIsRefreshingLocationData(true);
       locationIntelligenceService
-        .fetchLocationData(locToSync, currentLang, updated, true)
-        .then((fresh) => setLocationData(fresh))
-        .catch(() => {});
+        .fetchLocationData(liveCoords ? undefined : locToSync || undefined, currentLang, updated, true, liveCoords)
+        .then((fresh) => {
+          if (seq === locationFetchSeqRef.current) {
+            lastSyncedLangRef.current = currentLang;
+            setLocationData(fresh);
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (seq === locationFetchSeqRef.current) {
+            setIsRefreshingLocationData(false);
+          }
+        });
     }
 
     try {
@@ -597,15 +670,21 @@ export function App() {
       firestoreService.syncLocalProfileToFirestore(nextProfile).catch(() => {});
     }
 
+    const seq = ++locationFetchSeqRef.current;
+    // Immediately clear stale cards from any previous location before fetching fresh AI results
+    setLocationData(null);
+    locationIntelligenceService.clearCachedData();
     setIsRefreshingLocationData(true);
     try {
       const fresh = await locationIntelligenceService.fetchLocationData(
-        resolvedLabel || undefined,
+        coords ? undefined : resolvedLabel || undefined,
         currentLang,
         nextProfile,
         true,
         coords
       );
+      if (seq !== locationFetchSeqRef.current) return;
+      lastSyncedLangRef.current = currentLang;
       setLocationData(fresh);
       if (fresh.location) {
         setActiveLocation(fresh.location);
@@ -623,20 +702,24 @@ export function App() {
           : `स्थान ${displayLoc} पर सेट हुआ, लेकिन लाइव AI अभी उपलब्ध नहीं है। पुनः प्रयास करें।`
       );
     } catch {} finally {
-      setIsRefreshingLocationData(false);
+      if (seq === locationFetchSeqRef.current) {
+        setIsRefreshingLocationData(false);
+      }
     }
   };
 
   const handleRefreshLocationAi = async (coordsOverride?: GpsCoordinates) => {
+    const seq = ++locationFetchSeqRef.current;
     setIsRefreshingLocationData(true);
     try {
+      const manualActive = locationIntelligenceService.isManualOverrideActive();
       let resolvedCoords: GpsCoordinates | undefined =
-        coordsOverride || locationIntelligenceService.getLiveGpsCoordinates();
+        coordsOverride || locationIntelligenceService.getLiveGpsCoordinates() || undefined;
       let targetLoc = profile?.location?.trim() || activeLocation;
       let nextProfile: BeneficiaryProfile | null = profile;
 
-      // Strictly prioritize fresh GPS coordinates if not yet captured in this session
-      if (!resolvedCoords) {
+      // Strictly prioritize fresh GPS coordinates if not yet captured in this session (unless user manually picked a district)
+      if (!resolvedCoords && !manualActive) {
         try {
           const detected = await locationIntelligenceService.detectGpsLocation();
           if (detected && typeof detected.latitude === 'number' && typeof detected.longitude === 'number') {
@@ -644,6 +727,7 @@ export function App() {
               latitude: detected.latitude,
               longitude: detected.longitude,
               accuracyMeters: detected.accuracyMeters,
+              capturedAt: Date.now(),
             };
             targetLoc = detected.location;
             setActiveLocation(detected.location);
@@ -667,12 +751,14 @@ export function App() {
       }
 
       const fresh = await locationIntelligenceService.fetchLocationData(
-        targetLoc || undefined,
+        resolvedCoords ? undefined : targetLoc || undefined,
         currentLang,
         nextProfile,
         true,
         resolvedCoords
       );
+      if (seq !== locationFetchSeqRef.current) return;
+      lastSyncedLangRef.current = currentLang;
       setLocationData(fresh);
       if (fresh.location) {
         setActiveLocation(fresh.location);
@@ -696,7 +782,9 @@ export function App() {
           : 'लाइव AI सेवा अभी उपलब्ध नहीं है। कृपया पुनः प्रयास करें।'
       );
     } finally {
-      setIsRefreshingLocationData(false);
+      if (seq === locationFetchSeqRef.current) {
+        setIsRefreshingLocationData(false);
+      }
     }
   };
 

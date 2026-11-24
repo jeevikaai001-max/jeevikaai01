@@ -22,6 +22,7 @@ import {
   parseLocationParts,
   LocationDetectionResult,
   GpsCoordinates,
+  isCoordinateMatch,
 } from '../services/locationIntelligenceService';
 import {
   mediaStorageService,
@@ -211,16 +212,35 @@ export const Dashboard: React.FC<DashboardProps> = ({
     return undefined;
   }, [locationData?.latitude, locationData?.longitude, locationData?.accuracyMeters, profile.latitude, profile.longitude, profile.locationAccuracyMeters]);
 
-  const hasTriggeredMountAiRef = useRef<boolean>(false);
+  const lastSyncedCoordKeyRef = useRef<string>('');
 
-  // Force an AI-driven refresh anchored to captured GPS coordinates if Dashboard opens without live AI data
+  // Force an AI-driven refresh whenever Dashboard opens without live AI data OR when captured GPS coordinates diverge (>0.5km) from locationData
   useEffect(() => {
-    if (hasTriggeredMountAiRef.current || isRefreshingLocationData || isDetectingLocation) return;
-    if (!locationData?.isAiGenerated && onRefreshLocationAi) {
-      hasTriggeredMountAiRef.current = true;
+    if (isRefreshingLocationData || isDetectingLocation || !onRefreshLocationAi) return;
+    const coordsDrifted = Boolean(
+      liveCoords &&
+        (!locationData ||
+          !isCoordinateMatch(liveCoords.latitude, liveCoords.longitude, locationData.latitude, locationData.longitude, 0.5))
+    );
+    const targetKey = liveCoords
+      ? `${liveCoords.latitude.toFixed(3)},${liveCoords.longitude.toFixed(3)}|${L}`
+      : `${locationLabel}|${L}`;
+
+    if ((!locationData?.isAiGenerated || coordsDrifted) && lastSyncedCoordKeyRef.current !== targetKey) {
+      lastSyncedCoordKeyRef.current = targetKey;
       onRefreshLocationAi(liveCoords);
     }
-  }, [locationData?.isAiGenerated, isRefreshingLocationData, isDetectingLocation, liveCoords, onRefreshLocationAi]);
+  }, [
+    locationData?.isAiGenerated,
+    locationData?.latitude,
+    locationData?.longitude,
+    isRefreshingLocationData,
+    isDetectingLocation,
+    liveCoords,
+    locationLabel,
+    L,
+    onRefreshLocationAi,
+  ]);
 
   const handleDetectLocation = async () => {
     if (isDetectingLocation) return;
@@ -743,7 +763,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
               {onRefreshLocationAi && (
                 <button
-                  onClick={() => onRefreshLocationAi(liveCoords)}
+                  onClick={() => {
+                    lastSyncedCoordKeyRef.current = '';
+                    onRefreshLocationAi(liveCoords);
+                  }}
                   disabled={isRefreshingLocationData}
                   className="min-h-12 px-4 rounded-xl bg-white border border-[#245A91]/30 text-[#245A91] hover:bg-[#F7F9FC] text-sm font-bold flex items-center gap-2 disabled:opacity-70 transition-colors"
                 >

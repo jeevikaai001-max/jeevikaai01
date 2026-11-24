@@ -27,10 +27,10 @@ const D = {
     hin: 'Aapki padhai, ruchi aur location ke hisaab se banayi gayi yojana.',
   },
   demoNote: {
-    hi: 'यह नमूना (डेमो) प्रोफ़ाइल है। अपनी जानकारी देने के लिए "फिर से जानकारी दें" दबाएँ।',
-    bho: 'ई नमूना (डेमो) प्रोफ़ाइल बा। आपन जानकारी देवे खातिर "फेर से जानकारी दीं" दबाईं।',
-    en: 'This is a sample (demo) profile. Tap "Give your details" to see your own roadmap.',
-    hin: 'Yeh sample (demo) profile hai. Apni jaankari dene ke liye "Apni jaankari dein" dabayein.',
+    hi: 'व्यक्तिगत रोडमैप के लिए "प्रोफ़ाइल बदलें" या वॉइस मूल्यांकन पूरा करें। नीचे आपके सटीक GPS स्थान के लाइव AI अवसर दिखाए जा रहे हैं।',
+    bho: 'व्यक्तिगत रोडमैप खातिर आपन जानकारी पूरा करीं। नीचे रउआ सटीक GPS जगह के लाइव AI अवसर देखावल जा रहल बा।',
+    en: 'Complete your voice profile for tailored pathways. Live GPS-matched opportunities for your area are shown below.',
+    hin: 'Personal roadmap ke liye apni voice profile poori karein. Neeche aapki exact GPS location ke live AI opportunities dikh rahe hain.',
   },
   aiSummary: { hi: 'एआई विश्लेषण', bho: 'एआई विश्लेषण', en: 'AI analysis', hin: 'AI analysis' },
   aiField: { hi: 'सुझाया क्षेत्र', bho: 'सुझावल क्षेत्र', en: 'Suggested field', hin: 'Suggested field' },
@@ -67,7 +67,7 @@ const D = {
   // --- district hub
   hubTitle: { hi: 'मेरा जिला: आजीविका केंद्र', bho: 'हमार जिला: आजीविका केंद्र', en: 'My district livelihood hub', hin: 'Mera zila: livelihood hub' },
   liveAi: { hi: 'एआई से लाइव', bho: 'एआई से लाइव', en: 'Live via Gemini AI', hin: 'Live via Gemini AI' },
-  curated: { hi: 'जाँचा हुआ डेटा', bho: 'जाँचल डेटा', en: 'Verified curated data', hin: 'Verified curated data' },
+  curated: { hi: 'एआई सिंक प्रतीक्षित', bho: 'एआई सिंक बाकी बा', en: 'Awaiting Live AI Sync', hin: 'Awaiting Live AI Sync' },
   updated: { hi: 'अपडेट', bho: 'अपडेट', en: 'Updated', hin: 'Updated' },
   detectGps: { hi: 'जीपीएस से स्थान पता करें', bho: 'जीपीएस से जगह पता करीं', en: 'Detect my location (GPS)', hin: 'GPS se location pata karein' },
   detecting: { hi: 'खोज रहे हैं...', bho: 'खोज रहल बानी...', en: 'Detecting...', hin: 'Dhoondh rahe hain...' },
@@ -185,10 +185,10 @@ const D = {
 
   // --- misc
   sourceNote: {
-    hi: 'ये अवसर व अंक उदाहरण के तौर पर हैं। आवेदन से पहले केंद्र या कार्यालय से पुष्टि कर लें।',
-    bho: 'ई मौका अउर अंक उदाहरण खातिर बा। आवेदन से पहिले केंद्र या कार्यालय से पुष्टि क लीं।',
-    en: 'Listings and scores are illustrative. Please confirm with the center or office before applying.',
-    hin: 'Listings aur scores sirf udaharan ke liye hain. Apply karne se pehle center ya office se confirm karein.',
+    hi: 'ये अवसर आपकी सटीक GPS लोकेशन के आधार पर लाइव AI द्वारा लाए गए हैं। आवेदन से पहले संबंधित केंद्र या कार्यालय से विवरण की पुष्टि कर लें।',
+    bho: 'ई मौका रउआ सटीक GPS लोकेशन के हिसाब से लाइव AI से लावल गइल बा। आवेदन से पहिले संबंधित केंद्र या कार्यालय से पुष्टि क लीं।',
+    en: 'Listings are fetched live by AI for your GPS location. Please confirm exact dates and eligibility with the center or office before applying.',
+    hin: 'Yeh opportunities aapki exact GPS location ke hisaab se live AI dwara layi gayi hain. Apply karne se pehle center ya office se details confirm kar lein.',
   },
 } satisfies Record<string, Row>;
 
