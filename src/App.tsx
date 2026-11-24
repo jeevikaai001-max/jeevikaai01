@@ -142,15 +142,24 @@ export function App() {
   }, [currentLang]);
 
   useEffect(() => {
+    let active = true;
     const unsub = locationIntelligenceService.subscribe((data) => {
-      setLocationData(data);
+      if (active) setLocationData(data);
     });
     const locToFetch = profile?.location?.trim() || activeLocation;
     if (profile?.location && profile.location.trim() !== activeLocation) {
       setActiveLocation(profile.location.trim());
     }
-    locationIntelligenceService.fetchLocationData(locToFetch, currentLang, profile);
-    return () => unsub();
+    setIsRefreshingLocationData(true);
+    locationIntelligenceService
+      .fetchLocationData(locToFetch, currentLang, profile)
+      .finally(() => {
+        if (active) setIsRefreshingLocationData(false);
+      });
+    return () => {
+      active = false;
+      unsub();
+    };
   }, [profile?.location, activeLocation, currentLang]);
 
   useEffect(() => {
@@ -474,32 +483,47 @@ export function App() {
   };
 
   const handleLocationChange = async (newLocation: string) => {
-    setActiveLocation(newLocation);
+    const cleanedLoc = newLocation.trim();
+    if (!cleanedLoc) return;
+    setActiveLocation(cleanedLoc);
     const accuracy = locationIntelligenceService.getLocationAccuracy();
-    locationIntelligenceService.setActiveLocation(newLocation);
+    locationIntelligenceService.setActiveLocation(cleanedLoc);
 
+    let nextProfile: BeneficiaryProfile | null = profile;
     if (profile) {
-      const updated = {
+      nextProfile = {
         ...profile,
-        location: newLocation,
+        location: cleanedLoc,
         locationAccuracy: accuracy.level,
         locationConfidence: accuracy.confidenceScore,
         locationAccuracyMeters: accuracy.accuracyMeters,
       };
-      setProfile(updated);
-      storageService.saveProfile(updated);
+      setProfile(nextProfile);
+      storageService.saveProfile(nextProfile);
+      firestoreService.syncLocalProfileToFirestore(nextProfile).catch(() => {});
     }
 
     setIsRefreshingLocationData(true);
     try {
-      const fresh = await locationIntelligenceService.fetchLocationData(newLocation, currentLang, profile);
+      const fresh = await locationIntelligenceService.fetchLocationData(
+        cleanedLoc,
+        currentLang,
+        nextProfile,
+        true
+      );
       setLocationData(fresh);
       notify(
-        currentLang === 'bho'
-          ? `स्थान बदलल गइल: ${newLocation} (${accuracy.level})`
+        fresh.isAiGenerated
+          ? currentLang === 'bho'
+            ? `AI से ${cleanedLoc} के लाइव डेटा अपडेट हो गइल!`
+            : currentLang === 'en'
+            ? `Live AI data loaded for ${cleanedLoc}!`
+            : `AI से ${cleanedLoc} का लाइव डेटा अपडेट हो गया!`
+          : currentLang === 'bho'
+          ? `स्थान बदलल गइल: ${cleanedLoc}`
           : currentLang === 'en'
-          ? `Location updated to: ${newLocation} (${accuracy.level})`
-          : `स्थान अपडेट हुआ: ${newLocation} (${accuracy.level})`
+          ? `Location updated to: ${cleanedLoc}`
+          : `स्थान अपडेट हुआ: ${cleanedLoc}`
       );
     } catch {} finally {
       setIsRefreshingLocationData(false);
@@ -507,19 +531,29 @@ export function App() {
   };
 
   const handleRefreshLocationAi = async () => {
+    const targetLoc = profile?.location?.trim() || activeLocation;
     setIsRefreshingLocationData(true);
     try {
-      const fresh = await locationIntelligenceService.fetchLocationData(activeLocation, currentLang, profile, true);
+      const fresh = await locationIntelligenceService.fetchLocationData(
+        targetLoc,
+        currentLang,
+        profile,
+        true
+      );
       setLocationData(fresh);
       notify(
-        currentLang === 'bho'
-          ? 'AI से लाइव डेटा अपडेट हो गइल!'
+        fresh.isAiGenerated
+          ? currentLang === 'bho'
+            ? `AI से ${fresh.district} के लाइव डेटा अपडेट हो गइल!`
+            : currentLang === 'en'
+            ? `Live Gemini AI data refreshed for ${fresh.district}!`
+            : `AI द्वारा ${fresh.district} का लाइव डेटा सफलतापूर्वक लोड हुआ!`
           : currentLang === 'en'
-          ? 'Live location data refreshed via Gemini AI!'
-          : 'AI द्वारा लाइव लोकेशन डेटा सफलतापूर्वक लोड हुआ!'
+          ? `Could not reach live AI right now; showing ${fresh.district} local data.`
+          : `लाइव AI अभी व्यस्त है, ${fresh.district} का स्थानीय डेटा दिखाया जा रहा है।`
       );
     } catch {
-      notify('Curated district data is active.');
+      notify('Local district data is active.');
     } finally {
       setIsRefreshingLocationData(false);
     }
@@ -648,7 +682,7 @@ export function App() {
     navigateTo('home');
   };
 
-  const activeProfile = profile || { ...DEMO, isDemo: true };
+  const activeProfile = profile || { ...DEMO, location: activeLocation, isDemo: true };
 
   return (
     <div className="min-h-screen flex flex-col bg-[#F7F9FC] text-[#202B36]">

@@ -13,7 +13,8 @@ import { storageService } from './storageService';
 import { aiGateway } from './aiGateway';
 
 // Storage key for caching current location livelihood data
-const LOCATION_DATA_CACHE_KEY = 'jeevika_location_livelihood_cache_v2';
+const LOCATION_DATA_CACHE_KEY = 'jeevika_location_livelihood_cache_v3';
+const LEGACY_LOCATION_DATA_CACHE_KEY = 'jeevika_location_livelihood_cache_v2';
 const ACTIVE_LOCATION_KEY = 'jeevika_active_location_v2';
 const ACCURACY_STORAGE_KEY = 'jeevika_location_accuracy_v2';
 
@@ -853,7 +854,53 @@ export function normalizeDistrictKey(districtStr: string): string {
 }
 
 /**
- * Centroid coordinates for popular districts to render the map immediately
+ * Parses "Locality, District, State" | "District, State" | "District" cleanly
+ * and auto-resolves Indian state when only district/city is provided.
+ */
+export function parseLocationParts(loc?: string): { locality: string; district: string; state: string } {
+  const cleaned = String(loc || '').trim();
+  if (!cleaned) {
+    return { locality: '', district: 'Maharajganj', state: 'Uttar Pradesh' };
+  }
+  const parts = cleaned.split(',').map((p) => p.trim()).filter(Boolean);
+  let locality = '';
+  let district = '';
+  let state = '';
+
+  if (parts.length >= 3) {
+    locality = parts[0];
+    district = parts[parts.length - 2];
+    state = parts[parts.length - 1];
+  } else if (parts.length === 2) {
+    district = parts[0];
+    state = parts[1];
+  } else {
+    district = parts[0];
+  }
+
+  if (!state && district) {
+    const dLower = district.toLowerCase();
+    const matchedRegion = POPULAR_INDIAN_REGIONS.find((r) =>
+      r.districts.some(
+        (d) =>
+          d.name.toLowerCase() === dLower ||
+          d.name.toLowerCase().includes(dLower) ||
+          dLower.includes(d.name.toLowerCase().split('(')[0].trim()) ||
+          d.hi === district
+      )
+    );
+    state = matchedRegion ? matchedRegion.state : 'India';
+  }
+
+  return {
+    locality,
+    district: district || 'Maharajganj',
+    state: state || 'India',
+  };
+}
+
+/**
+ * Centroid coordinates for Indian districts/cities to render the map immediately
  */
 export const DISTRICT_COORDINATES: Record<string, { lat: number; lng: number }> = {
   ghaziabad: { lat: 28.6692, lng: 77.4538 },
@@ -882,13 +929,30 @@ export const DISTRICT_COORDINATES: Record<string, { lat: number; lng: number }> 
   ranchi: { lat: 23.3441, lng: 85.3096 },
   dhanbad: { lat: 23.7957, lng: 86.4304 },
   jamshedpur: { lat: 22.8046, lng: 86.2029 },
-  delhi: { lat: 28.7041, lng: 77.1025 },
+  delhi: { lat: 28.6139, lng: 77.2090 },
+  gurugram: { lat: 28.4595, lng: 77.0266 },
+  faridabad: { lat: 28.4089, lng: 77.3178 },
   bhopal: { lat: 23.2599, lng: 77.4126 },
+  indore: { lat: 22.7196, lng: 75.8577 },
   jaipur: { lat: 26.9124, lng: 75.7873 },
+  jodhpur: { lat: 26.2389, lng: 73.0243 },
+  udaipur: { lat: 24.5854, lng: 73.7125 },
+  mumbai: { lat: 19.0760, lng: 72.8777 },
+  pune: { lat: 18.5204, lng: 73.8567 },
+  nagpur: { lat: 21.1458, lng: 79.0882 },
+  kolkata: { lat: 22.5726, lng: 88.3639 },
+  bengaluru: { lat: 12.9716, lng: 77.5946 },
+  hyderabad: { lat: 17.3850, lng: 78.4867 },
+  chennai: { lat: 13.0827, lng: 80.2707 },
+  ahmedabad: { lat: 23.0225, lng: 72.5714 },
+  chandigarh: { lat: 30.7333, lng: 76.7794 },
+  dehradun: { lat: 30.3165, lng: 78.0322 },
+  guwahati: { lat: 26.1445, lng: 91.7362 },
+  bhubaneswar: { lat: 20.2961, lng: 85.8245 },
 };
 
 export function getDistrictCoordinates(districtStr?: string): { lat: number; lng: number } {
-  if (!districtStr) return { lat: 28.6692, lng: 77.4538 };
+  if (!districtStr) return { lat: 28.6139, lng: 77.2090 };
   const key = normalizeDistrictKey(districtStr);
   return DISTRICT_COORDINATES[key] || { lat: 26.8467, lng: 80.9462 };
 }
@@ -955,6 +1019,9 @@ class LocationIntelligenceService {
 
   private init() {
     try {
+      // Remove legacy poisoned v2 cache that may contain old SW Maharajganj demo data
+      localStorage.removeItem(LEGACY_LOCATION_DATA_CACHE_KEY);
+
       const savedLoc = localStorage.getItem(ACTIVE_LOCATION_KEY);
       if (savedLoc) {
         this.activeLocation = savedLoc;
@@ -962,14 +1029,18 @@ class LocationIntelligenceService {
       const cached = localStorage.getItem(LOCATION_DATA_CACHE_KEY);
       if (cached) {
         const parsed = JSON.parse(cached) as LocationLivelihoodData;
-        if (parsed && Array.isArray(parsed.schemes)) {
-          parsed.schemes = parsed.schemes.map((s) =>
-            s && typeof s.imageUrl === 'string' && s.imageUrl.includes('hero_livelihood_banner_')
-              ? { ...s, imageUrl: undefined }
-              : s
-          );
+        const hasLegacyOfflineDemo = Array.isArray(parsed?.opportunities) &&
+          parsed.opportunities.some((o) => String(o?.id || '').startsWith('offline-'));
+        if (parsed && !hasLegacyOfflineDemo) {
+          if (Array.isArray(parsed.schemes)) {
+            parsed.schemes = parsed.schemes.map((s) =>
+              s && typeof s.imageUrl === 'string' && s.imageUrl.includes('hero_livelihood_banner_')
+                ? { ...s, imageUrl: undefined }
+                : s
+            );
+          }
+          this.cachedData = parsed;
         }
-        this.cachedData = parsed;
       }
       const savedAcc = localStorage.getItem(ACCURACY_STORAGE_KEY);
       if (savedAcc) {
@@ -1101,9 +1172,8 @@ class LocationIntelligenceService {
   private inFlightRequests = new Map<string, Promise<LocationLivelihoodData>>();
 
   /**
-   * Generates or fetches actual location-based personalized livelihood data.
-   * Routes through aiGateway (Cloudflare Worker when VITE_CLOUDFLARE_WORKER_URL is set,
-   * otherwise local Express /api/generate-location-data), with graceful offline fallback.
+   * Generates or fetches live area-wise personalized livelihood data via Gemini AI
+   * (Cloudflare Worker -> Express fallback), ensuring wrong-district demo data never leaks.
    */
   public async fetchLocationData(
     targetLocation?: string,
@@ -1114,14 +1184,25 @@ class LocationIntelligenceService {
     const loc = (targetLocation || this.activeLocation || 'Maharajganj, Uttar Pradesh').trim();
     this.setActiveLocation(loc);
 
-    const parts = loc.split(',').map((p) => p.trim()).filter(Boolean);
-    const localityFromStr = parts.length >= 3 ? parts[0] : '';
-    const district = parts.length >= 3 ? parts[parts.length - 2] : parts[0] || 'Maharajganj';
-    const state = parts.length >= 2 ? parts[parts.length - 1] : 'Uttar Pradesh';
+    const parsedParts = parseLocationParts(loc);
+    const localityFromStr = parsedParts.locality;
+    const district = parsedParts.district;
+    const state = parsedParts.state;
+    const requestedDistrictKey = normalizeDistrictKey(district);
 
     const accuracy = this.getLocationAccuracy();
     const locality = localityFromStr || accuracy.locality || '';
     const pincode = accuracy.pincode || '';
+
+    // Immediately switch UI out of any stale DIFFERENT district while live AI loads
+    const cachedDistrictKey = this.cachedData
+      ? normalizeDistrictKey(this.cachedData.district || this.cachedData.location || '')
+      : '';
+    if (!this.cachedData || cachedDistrictKey !== requestedDistrictKey) {
+      const instantDistrictBaseline = this.buildFallbackData(loc, district, state);
+      this.notify(instantDistrictBaseline);
+    }
+
     const profileSig = [
       userProfile?.education || '',
       userProfile?.skills || '',
@@ -1135,7 +1216,7 @@ class LocationIntelligenceService {
     }
 
     const runFetch = async (): Promise<LocationLivelihoodData> => {
-      // 1. Try Live Gemini API via AI Gateway (Cloudflare Worker -> Express fallback)
+      // 1. Live Gemini API via AI Gateway (Cloudflare Worker -> Express fallback)
       try {
         const payload = await aiGateway.generateLocationData({
           location: loc,
@@ -1147,7 +1228,23 @@ class LocationIntelligenceService {
           existingProfile: userProfile || {},
         });
 
-        if (payload && payload.result && !payload.fallback) {
+        const hasOfflineDemoIds =
+          Array.isArray(payload?.result?.opportunities) &&
+          payload.result.opportunities.some((o: any) => String(o?.id || '').startsWith('offline-'));
+
+        const rawReturnedDistrict = String(payload?.result?.district || '').trim();
+        const returnedDistrictKey = normalizeDistrictKey(rawReturnedDistrict);
+        const isWrongMaharajganjLeak =
+          returnedDistrictKey === 'maharajganj' && requestedDistrictKey !== 'maharajganj';
+
+        if (
+          payload &&
+          payload.result &&
+          !payload.fallback &&
+          !(payload as any).offline &&
+          !hasOfflineDemoIds &&
+          !isWrongMaharajganjLeak
+        ) {
           const toStringArray = (val: unknown): string[] => {
             if (Array.isArray(val)) return val.map((x) => String(x).trim()).filter(Boolean);
             if (typeof val === 'string') return val.split(/[,;\n।|]+/).map((s) => s.trim()).filter(Boolean);
@@ -1157,8 +1254,8 @@ class LocationIntelligenceService {
             ...o,
             documentsRequired: toStringArray(o?.documentsRequired),
           });
-          const resolvedDistrict = payload.result.district || district;
-          const resolvedState = payload.result.state || state;
+          const resolvedDistrict = rawReturnedDistrict || district;
+          const resolvedState = String(payload.result.state || '').trim() || state;
           const rawInsight = payload.result.insight || this.getDefaultInsight(resolvedDistrict, resolvedState);
           const coords = getDistrictCoordinates(resolvedDistrict);
           const liveData: LocationLivelihoodData = {
@@ -1193,19 +1290,23 @@ class LocationIntelligenceService {
         console.warn('Live location API fetch fell back to offline Cache API / curated engine:', err);
       }
 
-      // 2. Try Service Worker Cache API / Local Cached Livelihood Data for the exact same district
+      // 2. Try cached livelihood data ONLY if it matches the exact requested district and isn't legacy demo data
       try {
         const cached = await storageService.loadCachedLivelihoodData();
+        const isLegacyDemo =
+          Array.isArray(cached?.opportunities) &&
+          cached!.opportunities.some((o) => String(o?.id || '').startsWith('offline-'));
         if (
           cached &&
-          normalizeDistrictKey(cached.district || cached.location || '') === normalizeDistrictKey(district)
+          !isLegacyDemo &&
+          normalizeDistrictKey(cached.district || cached.location || '') === requestedDistrictKey
         ) {
           this.notify(cached);
           return cached;
         }
       } catch {}
 
-      // 3. Curated Match Fallback
+      // 3. District-matched fallback (strictly localized to requested district & state)
       const fallbackData = this.buildFallbackData(loc, district, state);
       this.notify(fallbackData);
       return fallbackData;
@@ -1439,56 +1540,74 @@ class LocationIntelligenceService {
             let state = 'Uttar Pradesh';
 
             try {
+              const nomController = new AbortController();
+              const nomTimer = setTimeout(() => nomController.abort(), 4500);
               const res = await fetch(
                 `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=18&addressdetails=1`,
-                { headers: { 'Accept': 'application/json' } }
+                { headers: { 'Accept': 'application/json' }, signal: nomController.signal }
               );
+              clearTimeout(nomTimer);
               if (res.ok) {
                 const data = await res.json();
                 addr = data.address || {};
-                locality = addr.village || addr.hamlet || addr.town || addr.city || addr.suburb || addr.neighbourhood || addr.residential || addr.road || '';
-                rawDistrict = addr.state_district || addr.county || addr.city || addr.district || '';
+                locality = addr.village || addr.hamlet || addr.suburb || addr.neighbourhood || addr.town || addr.city_district || addr.residential || '';
+                rawDistrict = addr.state_district || addr.county || addr.city || addr.district || addr.town || '';
                 if (addr.state) state = addr.state;
                 if (addr.postcode) pincode = addr.postcode;
                 if (rawDistrict || locality) isGeocoded = true;
               }
             } catch (e) {
-              // Nominatim failed
+              // Nominatim failed or timed out
             }
 
-            // Secondary fallback: BigDataCloud Reverse Geocoding
-            if (!rawDistrict && !locality) {
+            // Secondary fallback / enrichment: BigDataCloud Reverse Geocoding (fast & reliable)
+            if (!rawDistrict || !state || !locality) {
               try {
+                const bdcController = new AbortController();
+                const bdcTimer = setTimeout(() => bdcController.abort(), 4500);
                 const bdcRes = await fetch(
-                  `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`
+                  `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`,
+                  { signal: bdcController.signal }
                 );
+                clearTimeout(bdcTimer);
                 if (bdcRes.ok) {
                   const bdc = await bdcRes.json();
                   const adminList = bdc.localityInfo?.administrative || [];
                   const districtEntry = adminList.find(
                     (a: any) =>
-                      (a.adminLevel === 6 || a.adminLevel === 5 || a.adminLevel === 4) &&
+                      (a.adminLevel === 6 || a.adminLevel === 5) &&
                       !a.name.toLowerCase().includes('division') &&
                       !a.name.toLowerCase().includes('mandal')
                   );
-                  rawDistrict = districtEntry?.name || bdc.city || bdc.locality || '';
+                  if (!rawDistrict) {
+                    rawDistrict = districtEntry?.name || bdc.city || bdc.locality || '';
+                  }
                   if (bdc.principalSubdivision) state = bdc.principalSubdivision;
                   if (!locality && bdc.locality) locality = bdc.locality;
-                  if (bdc.postcode) pincode = bdc.postcode;
-                  if (rawDistrict) isGeocoded = true;
+                  if (!pincode && bdc.postcode) pincode = bdc.postcode;
+                  if (rawDistrict || locality) isGeocoded = true;
                 }
               } catch (e) {}
             }
 
-            let cleanDistrict = rawDistrict ? rawDistrict.replace(/district/i, '').trim() : '';
+            let cleanDistrict = rawDistrict ? rawDistrict.replace(/\bdistrict\b/i, '').trim() : '';
 
             const lowerClean = cleanDistrict.toLowerCase();
-            const isStateName = ['uttar pradesh', 'bihar', 'madhya pradesh', 'rajasthan', 'jharkhand', 'maharashtra', 'haryana', 'west bengal', 'punjab', 'gujarat', 'uttarakhand', 'chhattisgarh', 'odisha', 'karnataka', 'tamil nadu', 'telangana', 'andhra pradesh', 'kerala', 'assam', 'delhi ncr', 'delhi'].some(st => lowerClean.includes(st));
+            const isExactStateName = [
+              'uttar pradesh', 'bihar', 'madhya pradesh', 'rajasthan', 'jharkhand',
+              'maharashtra', 'haryana', 'west bengal', 'punjab', 'gujarat', 'uttarakhand',
+              'chhattisgarh', 'odisha', 'karnataka', 'tamil nadu', 'telangana',
+              'andhra pradesh', 'kerala', 'assam', 'himachal pradesh', 'goa',
+            ].includes(lowerClean);
 
-            if (!cleanDistrict || isStateName || cleanDistrict.length < 2) {
-              const nearest = getNearestDistrict(latitude, longitude);
-              cleanDistrict = nearest.district;
-              state = nearest.state;
+            if (!cleanDistrict || isExactStateName || cleanDistrict.length < 2) {
+              if (locality && locality.length >= 2) {
+                cleanDistrict = locality;
+              } else {
+                const nearest = getNearestDistrict(latitude, longitude);
+                cleanDistrict = nearest.district;
+                state = nearest.state;
+              }
             }
 
             const cleanLocality = locality ? locality.replace(/tahsil|tehsil|block|sub-district/gi, '').trim() : '';

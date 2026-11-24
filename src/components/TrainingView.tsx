@@ -249,7 +249,9 @@ export const TrainingView: React.FC<TrainingViewProps> = ({
     if (locationDataMatches.length > 0) {
       return locationDataMatches;
     }
-    return combinedTrainingItems.filter((item) => applyPathwayAndSearch(item, false));
+    return selectedDistrict === 'all'
+      ? combinedTrainingItems.filter((item) => applyPathwayAndSearch(item, false))
+      : [];
   }, [combinedTrainingItems, filterPathway, selectedDistrict, searchQuery, locationData]);
 
   const handleListen = (item: Opportunity) => {
@@ -282,6 +284,7 @@ export const TrainingView: React.FC<TrainingViewProps> = ({
         r.districts.some((d) => d.name.toLowerCase() === dist.toLowerCase())
       );
       const stateName = stateMatch ? stateMatch.state : 'Uttar Pradesh';
+      locationIntelligenceService.setManualDistrict(dist, stateName);
       onLocationChange(`${dist}, ${stateName}`);
     }
   };
@@ -316,18 +319,19 @@ export const TrainingView: React.FC<TrainingViewProps> = ({
                 <span className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-[#287D73]/12 text-[#287D73] border border-[#287D73]/25 tabular-nums">
                   {filtered.length} {currentLang === 'en' ? 'centers active' : 'केंद्र सक्रिय'}
                 </span>
-                {isLiveSyncing && (
+                {locationData?.isAiGenerated ? (
+                  <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-[#E3F1FA] text-[#245A91] border border-[#245A91]/20">
+                    Live AI
+                  </span>
+                ) : isLiveSyncing ? (
                   <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-white text-[#245A91] border border-[#DCE3EA]">
                     {currentLang === 'en' ? 'Catalog Synced' : 'डेटा सिंक'}
                   </span>
-                )}
+                ) : null}
               </div>
               <div className="text-lg font-extrabold text-[#17365D] flex items-center gap-2 mt-0.5">
                 <Icon name="pin" size={18} className="text-[#287D73]" />
-                <span>{selectedDistrict === 'all' ? 'समस्त जिले (All India)' : selectedDistrict}</span>
-                {locationData?.state && selectedDistrict !== 'all' && (
-                  <span className="text-xs text-[#5F6B76] font-normal">({locationData.state})</span>
-                )}
+                <span>{selectedDistrict === 'all' ? 'समस्त जिले (All India)' : (locationData?.location || selectedDistrict)}</span>
               </div>
             </div>
           </div>

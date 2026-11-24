@@ -1,6 +1,6 @@
 import { BeneficiaryProfile, LocationLivelihoodData, Opportunity } from '../types';
 
-const DATA_CACHE_NAME = 'jeevika-data-v1.4.0';
+const DATA_CACHE_NAME = 'jeevika-data-v2.0.0';
 
 const STORAGE_KEYS = {
   PROFILE: 'jeevika_profile_v1',
@@ -8,7 +8,7 @@ const STORAGE_KEYS = {
   SHORTLIST_ITEMS: 'jeevika_shortlist_items_v1',
   ROADMAP_PROGRESS: 'jeevika_roadmap_progress_v1',
   CURRENT_STEP: 'jeevika_current_step_v1',
-  LIVELIHOOD_DATA: 'jeevika_location_livelihood_cache_v2',
+  LIVELIHOOD_DATA: 'jeevika_location_livelihood_cache_v3',
 };
 
 export const storageService = {

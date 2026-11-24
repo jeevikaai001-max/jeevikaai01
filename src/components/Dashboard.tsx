@@ -16,7 +16,7 @@ import { rankPaths, rankJobs, buildSummary, slug } from '../services/recommendat
 import { EDU, WORK, MOB } from '../data/mockData';
 import { speechService } from '../services/speechService';
 import { storageService } from '../services/storageService';
-import { locationIntelligenceService, POPULAR_INDIAN_REGIONS } from '../services/locationIntelligenceService';
+import { locationIntelligenceService, POPULAR_INDIAN_REGIONS, parseLocationParts } from '../services/locationIntelligenceService';
 import {
   mediaStorageService,
   applyAdminSchemeImages,
@@ -157,32 +157,34 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [celebratedStageKey, setCelebratedStageKey] = useState<string | null>(null);
   const [bannerDismissed, setBannerDismissed] = useState(false);
   const [showDistrictModal, setShowDistrictModal] = useState(false);
+  const [customAreaInput, setCustomAreaInput] = useState('');
 
   const displayName = profile.name && profile.name.trim() ? profile.name.trim() : dt('beneficiary', L);
   const displayInitial = displayName.charAt(0).toUpperCase();
-  const locationLabel = profile.location || locationData?.district || '';
-  const districtShort = (locationData?.district || locationLabel.split(',')[0] || '').trim();
+  const locationLabel = locationData?.location || profile.location || locationData?.district || '';
+  const parsedLoc = parseLocationParts(locationLabel);
+  const districtShort = (locationData?.district || parsedLoc.district || '').trim();
 
   const currentAccuracy = useMemo(() => {
-    if (profile.locationAccuracy && profile.locationConfidence) {
-      return {
-        level: profile.locationAccuracy,
-        confidenceScore: profile.locationConfidence,
-        accuracyMeters: profile.locationAccuracyMeters,
-        locality: undefined as string | undefined,
-      };
-    }
     if (locationData?.accuracyLevel && locationData?.confidenceScore) {
       return {
         level: locationData.accuracyLevel,
         confidenceScore: locationData.confidenceScore,
         accuracyMeters: locationData.accuracyMeters,
-        locality: undefined as string | undefined,
+        locality: parsedLoc.locality || locationIntelligenceService.getLocationAccuracy().locality,
+      };
+    }
+    if (profile.locationAccuracy && profile.locationConfidence) {
+      return {
+        level: profile.locationAccuracy,
+        confidenceScore: profile.locationConfidence,
+        accuracyMeters: profile.locationAccuracyMeters,
+        locality: parsedLoc.locality || undefined,
       };
     }
     const a = locationIntelligenceService.getLocationAccuracy();
     return { level: a.level, confidenceScore: a.confidenceScore, accuracyMeters: a.accuracyMeters, locality: a.locality };
-  }, [profile.locationAccuracy, profile.locationConfidence, profile.locationAccuracyMeters, locationData]);
+  }, [profile.locationAccuracy, profile.locationConfidence, profile.locationAccuracyMeters, locationData, parsedLoc.locality]);
 
   const handleDetectLocation = async () => {
     if (isDetectingLocation) return;
@@ -191,14 +193,17 @@ export const Dashboard: React.FC<DashboardProps> = ({
     try {
       const res = await locationIntelligenceService.detectGpsLocation();
       if (res && res.location) {
-        onUpdateProfile?.({
-          ...profile,
-          location: res.location,
-          locationAccuracy: res.accuracyLevel,
-          locationConfidence: res.confidenceScore,
-          locationAccuracyMeters: res.accuracyMeters,
-        });
-        onLocationChange?.(res.location);
+        if (onLocationChange) {
+          onLocationChange(res.location);
+        } else {
+          onUpdateProfile?.({
+            ...profile,
+            location: res.location,
+            locationAccuracy: res.accuracyLevel,
+            locationConfidence: res.confidenceScore,
+            locationAccuracyMeters: res.accuracyMeters,
+          });
+        }
         onNotify(`📍 ${res.location} (${res.confidenceScore}%)`);
       }
     } catch (err: any) {
@@ -218,16 +223,36 @@ export const Dashboard: React.FC<DashboardProps> = ({
   };
 
   const handleSelectManualDistrict = (districtName: string, stateName: string) => {
+    locationIntelligenceService.setManualDistrict(districtName, stateName);
     const newLoc = `${districtName}, ${stateName}`;
     setShowDistrictModal(false);
-    onUpdateProfile?.({
-      ...profile,
-      location: newLoc,
-      locationAccuracy: 'District-level',
-      locationConfidence: 88,
-    });
-    onLocationChange?.(newLoc);
-    onNotify(`📍 ${newLoc}`);
+    if (onLocationChange) {
+      onLocationChange(newLoc);
+    } else {
+      onUpdateProfile?.({
+        ...profile,
+        location: newLoc,
+        locationAccuracy: 'District-level',
+        locationConfidence: 88,
+      });
+    }
+  };
+
+  const handleCustomAreaSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const val = customAreaInput.trim();
+    if (!val) return;
+    const parts = parseLocationParts(val);
+    const formatted = parts.locality
+      ? `${parts.locality}, ${parts.district}, ${parts.state}`
+      : `${parts.district}, ${parts.state}`;
+    locationIntelligenceService.setManualDistrict(parts.district, parts.state);
+    locationIntelligenceService.setActiveLocation(formatted);
+    setCustomAreaInput('');
+    setShowDistrictModal(false);
+    if (onLocationChange) {
+      onLocationChange(formatted);
+    }
   };
 
   const selectedPathway = rankedPaths.find((p) => p.id === selectedPathId) || topPaths[0] || rankedPaths[0];
@@ -1190,6 +1215,21 @@ export const Dashboard: React.FC<DashboardProps> = ({
               </button>
             </div>
             <p className="text-xs text-[#5F6B76]">{dt('gpsHint', L)}</p>
+            <form onSubmit={handleCustomAreaSubmit} className="flex gap-2">
+              <input
+                type="text"
+                value={customAreaInput}
+                onChange={(e) => setCustomAreaInput(e.target.value)}
+                placeholder={L === 'en' ? 'Type village, town, or district (e.g. Gomti Nagar, Lucknow)...' : 'गाँव, कस्बा या जिला लिखें (जैसे: Gomti Nagar, Lucknow)...'}
+                className="flex-1 min-h-[42px] px-3 py-2 rounded-xl border border-[#DCE3EA] text-xs focus:border-[#287D73] focus:outline-none text-[#17365D]"
+              />
+              <button
+                type="submit"
+                className="min-h-[42px] px-4 py-2 rounded-xl bg-[#287D73] hover:bg-[#1E6058] text-white text-xs font-bold"
+              >
+                {L === 'en' ? 'Apply' : 'लागू करें'}
+              </button>
+            </form>
             <div className="overflow-y-auto space-y-4 pr-1 flex-1">
               {POPULAR_INDIAN_REGIONS.map((stateGroup) => (
                 <div key={stateGroup.state} className="space-y-1.5">

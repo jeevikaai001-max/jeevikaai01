@@ -246,7 +246,9 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
     if (locationDataMatches.length > 0) {
       return locationDataMatches;
     }
-    return combinedOpportunities.filter((j) => applyTabAndSearch(j, false));
+    return selectedDistrict === 'all'
+      ? combinedOpportunities.filter((j) => applyTabAndSearch(j, false))
+      : [];
   }, [combinedOpportunities, activeTab, selectedDistrict, searchQuery, locationData]);
 
   const handleListen = (job: Opportunity) => {
@@ -280,6 +282,7 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
         r.districts.some((d) => d.name.toLowerCase() === dist.toLowerCase())
       );
       const stateName = stateMatch ? stateMatch.state : 'Uttar Pradesh';
+      locationIntelligenceService.setManualDistrict(dist, stateName);
       onLocationChange(`${dist}, ${stateName}`);
     }
   };
@@ -313,13 +316,15 @@ export const OpportunitiesView: React.FC<OpportunitiesViewProps> = ({
                 <span className="px-2 py-0.5 rounded-lg text-[10px] font-bold tabular-nums bg-[#F7F9FC] text-[#17365D] border border-[#DCE3EA]">
                   {filtered.length} अवसर उपलब्ध
                 </span>
+                {locationData?.isAiGenerated && (
+                  <span className="px-2 py-0.5 rounded-lg text-[10px] font-bold bg-[#E3F1FA] text-[#245A91] border border-[#245A91]/20">
+                    Live AI
+                  </span>
+                )}
               </div>
               <div className="text-lg font-extrabold text-[#17365D] flex items-center gap-1.5 mt-0.5">
                 <Icon name="pin" size={16} className="text-[#287D73]" />
-                <span>{selectedDistrict === 'all' ? 'समस्त जिले (All India)' : selectedDistrict}</span>
-                {locationData?.state && selectedDistrict !== 'all' && (
-                  <span className="text-xs text-[#5F6B76] font-normal">({locationData.state})</span>
-                )}
+                <span>{selectedDistrict === 'all' ? 'समस्त जिले (All India)' : (locationData?.location || selectedDistrict)}</span>
               </div>
             </div>
           </div>

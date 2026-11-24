@@ -1,398 +1,71 @@
-// JeevikaAI Service Worker v1.4.1 - Cache API Offline Strategy
-// Static Assets Precaching & Essential Livelihood Data Persistence
+// JeevikaAI Service Worker v2.0.0 - Clean App Shell Offline Support
+// Never intercepts POST requests, cross-origin AI calls, or /api/* endpoints.
 
-const STATIC_CACHE_NAME = 'jeevika-static-v1.4.1';
-const DATA_CACHE_NAME = 'jeevika-data-v1.4.1';
+const STATIC_CACHE_NAME = 'jeevika-static-v2.0.0';
 const OFFLINE_URL = '/';
 
-// Precache Core App Shell and Critical Static Assets
 const PRECACHE_ASSETS = [
   '/',
   '/index.html',
   '/manifest.webmanifest',
   '/icons/icon-192.svg',
   '/icons/icon-512.svg',
-  '/icons/icon-maskable-512.svg'
+  '/icons/icon-maskable-512.svg',
 ];
 
-// Curated Essential Livelihood Data cached during install so the PWA
-// has high-value verified jobs, government schemes, and training centers offline immediately.
-const ESSENTIAL_LIVELIHOOD_DATA = {
-  location: 'Maharajganj, Uttar Pradesh',
-  district: 'Maharajganj',
-  state: 'Uttar Pradesh',
-  isAiGenerated: false,
-  offlineCached: true,
-  timestamp: new Date().toISOString(),
-  accuracyLevel: 'District-level',
-  confidenceScore: 88,
-  accuracyMeters: 250,
-  insight: {
-    district: 'Maharajganj',
-    state: 'Uttar Pradesh',
-    economicHub: 'Agro-logistics, Digital Seva, Solar Power & Rural Commerce',
-    topSectors: [
-      'Digital CSC Seva & Banking Mitra',
-      'Solar Rooftop & Tube-well Installation',
-      'Readymade Garment & Tailoring Clusters',
-      'Agro-Mandi Retail & Logistics'
-    ],
-    averageMonthlyWage: '₹8,500 - ₹14,500',
-    activeSchemesCount: 7,
-    openVacanciesCount: 38,
-    verifiedCentersCount: 3,
-    summary: 'स्थानीय क्षेत्र में पीएम विश्वकर्मा, सोलर रूफटॉप, सीएससी डिजिटल सेवाओं और गारमेंट क्लस्टर में सत्यापित स्वरोजगार और काम के अवसर उपलब्ध हैं।'
-  },
-  opportunities: [
-    {
-      id: 'offline-j1',
-      title: 'CSC Digital Seva Assistant (डिजिटल सेवा सहायक)',
-      org: 'District e-Governance Society / CSC Kendra',
-      type: 'Job',
-      loc: 'Civil Lines, Local Tehsil',
-      km: 3,
-      pay: '₹8,500 to ₹12,500 per month',
-      path: 'digital',
-      verified: true,
-      source: 'District e-Governance Society',
-      lastVerifiedDate: 'October 2026',
-      eligibility: '10वीं पास, बुनियादी स्मार्टफोन व कंप्यूटर का ज्ञान।',
-      documentsRequired: ['आधार कार्ड', '10वीं अंकपत्र', 'बैंक पासबुक'],
-      contactInfo: 'नजदीकी सीएससी केंद्र या कलेक्ट्रेट परिसर'
-    },
-    {
-      id: 'offline-j2',
-      title: 'Solar Rooftop & Technical Helper (सोलर तकनीशियन)',
-      org: 'Purvanchal Solar Energy Solutions',
-      type: 'Job',
-      loc: 'Nichlaul & Local Rural Sector',
-      km: 8,
-      pay: '₹9,500 to ₹14,500 per month',
-      path: 'solar',
-      verified: true,
-      source: 'PM Surya Ghar Approved Agency',
-      lastVerifiedDate: 'October 2026',
-      eligibility: 'शारीरिक रूप से स्वस्थ, छत पर कार्य करने में सहज।',
-      documentsRequired: ['आधार कार्ड', 'पासपोर्ट फोटो'],
-      contactInfo: 'सोलर प्रोजेक्ट फील्ड ऑफिस'
-    },
-    {
-      id: 'offline-j3',
-      title: 'Readymade Boutique & Uniform Tailor (सिलाई व टेलरिंग)',
-      org: 'Prerna Mahila Self-Help Cluster',
-      type: 'Self-employment',
-      loc: 'Local Block Hub',
-      km: 5,
-      pay: '₹7,000 to ₹14,000 per month (प्रति पीस)',
-      path: 'tailoring',
-      verified: true,
-      source: 'NRLM District Mission Management Unit',
-      lastVerifiedDate: 'October 2026',
-      eligibility: 'सिलाई मशीन चलाने का अनुभव, कटिंग व सिलाई।',
-      documentsRequired: ['आधार कार्ड'],
-      contactInfo: 'ब्लॉक मिशन कार्यालय'
-    },
-    {
-      id: 'offline-j4',
-      title: 'Agro Retail & Stock Executive (कृषि सेवा व खुदरा)',
-      org: 'Kisan Krishi Seva Kendra',
-      type: 'Job',
-      loc: 'Main Mandi Road',
-      km: 6,
-      pay: '₹9,000 to ₹13,000 per month',
-      path: 'retail',
-      verified: true,
-      source: 'Mandi Vyapar Mandal',
-      lastVerifiedDate: 'October 2026',
-      eligibility: '10वीं/12वीं पास, हिसाब-किताब व स्मार्टफोन ऐप।',
-      documentsRequired: ['आधार कार्ड', 'बायोडाटा'],
-      contactInfo: 'मंडी गेट नंबर 2'
-    }
-  ],
-  trainingCenters: [
-    {
-      id: 'offline-t1',
-      title: 'Govt ITI (सरकारी औद्योगिक प्रशिक्षण संस्थान)',
-      org: 'Department of Vocational Education UP',
-      type: 'Training',
-      loc: 'Shikarpur Road',
-      km: 4,
-      pay: '100% निःशुल्क सरकारी प्रशिक्षण + अप्रेंटिसशिप',
-      path: 'solar',
-      verified: true,
-      source: 'SCVT / NCVT Portal',
-      lastVerifiedDate: 'October 2026',
-      eligibility: '10वीं पास, आयु 14 से 40 वर्ष।',
-      documentsRequired: ['आधार कार्ड', 'अंकपत्र'],
-      contactInfo: 'प्रधानाचार्य कार्यालय, राजकीय आईटीआई'
-    },
-    {
-      id: 'offline-t2',
-      title: 'Union Bank RSETI (ग्रामीण स्वरोजगार प्रशिक्षण संस्थान)',
-      org: 'Ministry of Rural Development / Lead Bank',
-      type: 'Training',
-      loc: 'Lead Bank Campus',
-      km: 7,
-      pay: 'निःशुल्क आवासीय प्रशिक्षण + भोजन + मुद्रा लोन सहायता',
-      path: 'tailoring',
-      verified: true,
-      source: 'MoRD RSETI Network',
-      lastVerifiedDate: 'October 2026',
-      eligibility: 'आयु 18-45 वर्ष, स्वरोजगार की इच्छा रखने वाले ग्रामीण।',
-      documentsRequired: ['आधार कार्ड', 'राशन कार्ड', 'पासपोर्ट फोटो'],
-      contactInfo: 'आरसेटी निदेशक कार्यालय'
-    },
-    {
-      id: 'offline-t3',
-      title: 'PMKVY Kaushal Kendra (कौशल विकास केंद्र)',
-      org: 'Skill India Mission / NSDC',
-      type: 'Training',
-      loc: 'Near Main Bus Station',
-      km: 3,
-      pay: 'निःशुल्क सरकारी प्रमाण-पत्र + रोजगार मेला लिंकेज',
-      path: 'digital',
-      verified: true,
-      source: 'Skill India Digital Hub',
-      lastVerifiedDate: 'October 2026',
-      eligibility: '8वीं, 10वीं या 12वीं पास युवा।',
-      documentsRequired: ['आधार कार्ड', 'शैक्षणिक प्रमाण'],
-      contactInfo: 'केंद्र प्रबंधक, पीएमकेके'
-    }
-  ],
-  schemes: [
-    {
-      id: 'offline-sch-1',
-      name: 'PM Vishwakarma Scheme (पीएम विश्वकर्मा योजना)',
-      hiName: 'प्रधानमंत्री विश्वकर्मा योजना',
-      benefit: '₹15,000 टूलकिट ई-वाउचर + ₹3 लाख रियायती ऋण (5% ब्याज) + 5 दिन की आधुनिक ट्रेनिंग (₹500/दिन वजीफा)',
-      eligibility: '18 पारंपरिक ट्रेड के कारीगर (दर्जी, बढ़ई, लोहार, कुम्हार, राजमिस्त्री आदि)',
-      applyOffice: 'नजदीकी सीएससी डिजिटल केंद्र या जिला उद्योग केंद्र (DIC)',
-      category: 'toolkit',
-      financialSupport: '₹15,000 टूलकिट अनुदान + ₹3,00,000 ऋण'
-    },
-    {
-      id: 'offline-sch-2',
-      name: 'PMKVY 4.0 Skill Training (प्रधानमंत्री कौशल विकास योजना)',
-      hiName: 'पीएम कौशल विकास योजना 4.0',
-      benefit: 'निःशुल्क राष्ट्रीय प्रमाण-पत्र, इंडस्ट्री-आधारित ट्रेनिंग और अप्रेंटिसशिप लिंकेज',
-      eligibility: '8वीं/10वीं पास स्कूल-कॉलेज छोड़ने वाले या नए हुनर की चाह रखने वाले युवा',
-      applyOffice: 'Skill India Digital पोर्टल या नजदीकी पीएमकेके केंद्र',
-      category: 'central',
-      financialSupport: '100% निःशुल्क सरकारी प्रशिक्षण व प्रमाणन'
-    },
-    {
-      id: 'offline-sch-3',
-      name: 'Pradhan Mantri Mudra Yojana (प्रधानमंत्री मुद्रा योजना)',
-      hiName: 'प्रधानमंत्री मुद्रा योजना (PMMY)',
-      benefit: '₹50,000 (शिशु) से ₹10 लाख (तरुण) तक बिना किसी गारंटी के व्यवसाय ऋण',
-      eligibility: 'छोटे दुकानदार, टेलर, कारीगर, मरम्मत कार्यशाला व सेवा संचालक',
-      applyOffice: 'किसी भी राष्ट्रीयकृत बैंक शाखा में',
-      category: 'loan',
-      financialSupport: 'बिना कोलेटरल आसान ऋण स्वीकृति'
-    }
-  ]
-};
-
-// 1. Installation: Pre-cache static assets and essential livelihood data
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    Promise.all([
-      caches.open(STATIC_CACHE_NAME).then((cache) => {
-        return cache.addAll(PRECACHE_ASSETS);
-      }),
-      caches.open(DATA_CACHE_NAME).then((cache) => {
-        const essentialResponse = new Response(
-          JSON.stringify({
-            fallback: false,
-            offline: true,
-            cached: true,
-            result: ESSENTIAL_LIVELIHOOD_DATA
-          }),
-          {
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Jeevika-Offline': 'pre-cached'
-            }
-          }
-        );
-        return Promise.all([
-          cache.put('/api/essential-livelihood-data', essentialResponse.clone()),
-          cache.put('/api/livelihood-data', essentialResponse)
-        ]);
-      })
-    ]).then(() => self.skipWaiting())
+    caches
+      .open(STATIC_CACHE_NAME)
+      .then((cache) => cache.addAll(PRECACHE_ASSETS))
+      .catch(() => {})
+      .then(() => self.skipWaiting())
   );
 });
 
-// 2. Activation: Clean up stale cache versions and claim clients
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((cacheNames) => {
-      return Promise.all(
-        cacheNames.map((name) => {
-          if (name !== STATIC_CACHE_NAME && name !== DATA_CACHE_NAME) {
-            return caches.delete(name);
-          }
-        })
-      );
-    }).then(() => self.clients.claim())
+    caches
+      .keys()
+      .then((cacheNames) =>
+        Promise.all(
+          cacheNames.map((name) => {
+            if (name !== STATIC_CACHE_NAME && name !== 'jeevika-data-v2.0.0') {
+              return caches.delete(name);
+            }
+            return Promise.resolve();
+          })
+        )
+      )
+      .then(() => self.clients.claim())
   );
 });
 
-// 3. Fetch Event: Multi-tiered Caching Strategy with GET method guards
 self.addEventListener('fetch', (event) => {
   const request = event.request;
   const url = new URL(request.url);
 
-  // Only handle GET requests for cache storage operations
-  const isGet = request.method === 'GET';
-
-  // A. Essential Livelihood Data Endpoint (/api/essential-livelihood-data)
-  if (url.pathname.includes('/api/essential-livelihood-data') || url.pathname === '/api/livelihood-data') {
-    event.respondWith(
-      caches.match(request).then((cached) => {
-        if (cached) return cached;
-        return caches.match('/api/essential-livelihood-data').then((def) => {
-          if (def) return def;
-          return new Response(JSON.stringify({ fallback: false, result: ESSENTIAL_LIVELIHOOD_DATA }), {
-            headers: { 'Content-Type': 'application/json' }
-          });
-        });
-      })
-    );
+  // NEVER intercept non-GET requests (POST /api/chat, /api/generate-location-data, etc.)
+  if (request.method !== 'GET') {
     return;
   }
 
-  // B. Location Livelihood Generation API (/api/generate-location-data)
-  if (url.pathname.includes('/api/generate-location-data')) {
-    event.respondWith(
-      (async () => {
-        const dataCache = await caches.open(DATA_CACHE_NAME);
-
-        try {
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 6000);
-
-          const networkResponse = await fetch(request.clone(), {
-            signal: controller.signal
-          });
-          clearTimeout(timeoutId);
-
-          if (networkResponse && networkResponse.ok && isGet) {
-            const clone = networkResponse.clone();
-            await dataCache.put('/api/livelihood-data', clone);
-            return networkResponse;
-          } else if (networkResponse) {
-            return networkResponse;
-          }
-        } catch (fetchErr) {
-          // Network failed
-        }
-
-        const cachedLiveData = await dataCache.match('/api/livelihood-data');
-        if (cachedLiveData) return cachedLiveData;
-
-        const baselineData = await dataCache.match('/api/essential-livelihood-data');
-        if (baselineData) return baselineData;
-
-        return new Response(
-          JSON.stringify({
-            fallback: false,
-            offline: true,
-            result: ESSENTIAL_LIVELIHOOD_DATA
-          }),
-          { headers: { 'Content-Type': 'application/json' } }
-        );
-      })()
-    );
+  // NEVER intercept cross-origin requests (Cloudflare Worker, Nominatim, BigDataCloud, Firebase, OSM)
+  if (url.origin !== self.location.origin) {
     return;
   }
 
-  // C. Profile Analysis API (/api/analyze-profile)
-  if (url.pathname.includes('/api/analyze-profile')) {
-    event.respondWith(
-      (async () => {
-        const dataCache = await caches.open(DATA_CACHE_NAME);
-        try {
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 6000);
-          const networkRes = await fetch(request.clone(), { signal: controller.signal });
-          clearTimeout(timeoutId);
-          if (networkRes && networkRes.ok && isGet) {
-            await dataCache.put('/api/analyze-profile', networkRes.clone());
-            return networkRes;
-          } else if (networkRes) {
-            return networkRes;
-          }
-        } catch (e) {}
-
-        const cachedAnalysis = await dataCache.match('/api/analyze-profile');
-        if (cachedAnalysis) return cachedAnalysis;
-
-        return new Response(
-          JSON.stringify({
-            analysis: {
-              summary: 'ऑफ़लाइन विश्लेषण: आपके कौशल के अनुसार स्थानीय आजीविका अवसर उपलब्ध हैं।',
-              topCareerPathway: 'स्वरोजगार एवं तकनीकी सेवा',
-              readinessScore: 85,
-              keyStrengths: ['व्यावहारिक कार्य अनुभव', 'स्थानीय रोजगार तत्परता']
-            }
-          }),
-          { headers: { 'Content-Type': 'application/json' } }
-        );
-      })()
-    );
-    return;
-  }
-
-  // D. Offline Profile Sync (/api/offline-profile) - POST/PUT without cache.put on request
-  if (url.pathname.includes('/api/offline-profile')) {
-    if (!isGet) {
-      event.respondWith(
-        fetch(request).catch(
-          () =>
-            new Response(JSON.stringify({ success: true, offlineSaved: true }), {
-              headers: { 'Content-Type': 'application/json' }
-            })
-        )
-      );
-      return;
-    } else {
-      event.respondWith(
-        caches.match(request).then((cached) => {
-          if (cached) return cached;
-          return fetch(request).catch(
-            () => new Response(JSON.stringify(null), { headers: { 'Content-Type': 'application/json' } })
-          );
-        })
-      );
-      return;
-    }
-  }
-
-  // E. General API Fallback
+  // NEVER intercept any /api/* routes so live AI and backend data are always fresh
   if (url.pathname.startsWith('/api/')) {
-    event.respondWith(
-      fetch(request).catch(() => {
-        return new Response(
-          JSON.stringify({
-            fallback: true,
-            offline: true,
-            message: 'Device is offline. Using local rule engine & cached data.'
-          }),
-          { headers: { 'Content-Type': 'application/json' } }
-        );
-      })
-    );
     return;
   }
 
-  // F. Navigation Requests (HTML Pages)
+  // Navigation requests: Network-first with offline fallback
   if (request.mode === 'navigate') {
     event.respondWith(
       fetch(request)
         .then((response) => {
-          if (response && response.status === 200 && isGet) {
+          if (response && response.status === 200) {
             const clone = response.clone();
             caches.open(STATIC_CACHE_NAME).then((cache) => cache.put(request, clone));
           }
@@ -400,71 +73,30 @@ self.addEventListener('fetch', (event) => {
         })
         .catch(async () => {
           const cached = await caches.match(request);
-          if (cached) return cached;
-          return caches.match(OFFLINE_URL);
+          return cached || caches.match(OFFLINE_URL);
         })
     );
     return;
   }
 
-  // G. Google Fonts & Static Fonts
-  if (url.hostname.includes('googleapis.com') || url.hostname.includes('gstatic.com')) {
-    event.respondWith(
-      caches.match(request).then((cached) => {
-        if (cached) return cached;
-        return fetch(request).then((response) => {
-          if (response && response.status === 200 && isGet) {
-            const clone = response.clone();
-            caches.open(STATIC_CACHE_NAME).then((cache) => cache.put(request, clone));
-          }
-          return response;
-        }).catch(() => cached);
-      })
-    );
-    return;
-  }
-
-  // H. Static Assets (CSS, JS, SVG, Images, Webmanifest)
+  // Same-origin static assets: Stale-while-revalidate
   event.respondWith(
     caches.match(request).then((cachedResponse) => {
-      if (cachedResponse) {
-        if (isGet) {
-          fetch(request)
-            .then((networkResponse) => {
-              if (networkResponse && networkResponse.status === 200) {
-                caches.open(STATIC_CACHE_NAME).then((cache) => cache.put(request, networkResponse));
-              }
-            })
-            .catch(() => {});
-        }
-        return cachedResponse;
-      }
-
-      return fetch(request).then((networkResponse) => {
-        if (
-          !networkResponse ||
-          networkResponse.status !== 200 ||
-          (networkResponse.type !== 'basic' && networkResponse.type !== 'cors') ||
-          !isGet
-        ) {
+      const networkFetch = fetch(request)
+        .then((networkResponse) => {
+          if (networkResponse && networkResponse.status === 200 && networkResponse.type === 'basic') {
+            const clone = networkResponse.clone();
+            caches.open(STATIC_CACHE_NAME).then((cache) => cache.put(request, clone));
+          }
           return networkResponse;
-        }
-        const responseToCache = networkResponse.clone();
-        caches.open(STATIC_CACHE_NAME).then((cache) => {
-          cache.put(request, responseToCache);
-        });
-        return networkResponse;
-      }).catch(async () => {
-        if (request.destination === 'image') {
-          return caches.match('/icons/icon-192.svg');
-        }
-        return null;
-      });
+        })
+        .catch(() => cachedResponse);
+
+      return cachedResponse || networkFetch;
     })
   );
 });
 
-// Background Push Notification Event Handlers
 self.addEventListener('push', (event) => {
   const data = event.data
     ? event.data.json()
@@ -473,7 +105,7 @@ self.addEventListener('push', (event) => {
     body: data.body,
     icon: '/icons/icon-192.svg',
     badge: '/icons/icon-192.svg',
-    data: { url: data.url || '/' }
+    data: { url: data.url || '/' },
   };
   event.waitUntil(self.registration.showNotification(data.title, options));
 });
