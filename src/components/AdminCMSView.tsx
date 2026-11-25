@@ -1093,7 +1093,7 @@ export const AdminCMSView: React.FC<AdminCMSViewProps> = ({
             extraSubscriptions: pushSubscriptions,
           }),
         });
-        if (pushRes.ok) {
+        if (pushRes.ok && (pushRes.headers.get('content-type') || '').includes('application/json')) {
           const pushJson = await pushRes.json();
           webPushDelivered = Number(pushJson?.sent || 0);
           webPushMatched = Number(pushJson?.totalMatched || 0);

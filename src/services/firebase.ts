@@ -1962,6 +1962,11 @@ function writeLocalNotifs(items: PushNotificationRecord[]) {
   } catch {}
 }
 
+const isJsonResponse = (res: Response): boolean =>
+  res.ok && (res.headers.get('content-type') || '').includes('application/json');
+
+let pushApiUnavailable = false;
+
 export const notificationService = {
   /** Publishes a broadcast or targeted citizen notification to the backend push feed */
   async publishNotification(input: {
@@ -1996,16 +2001,20 @@ export const notificationService = {
     writeLocalNotifs(nextLocal);
 
     let syncedToCloud = false;
-    try {
-      const res = await fetch('/api/push/notifications', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(clean(record)),
-      });
-      if (res.ok) {
-        syncedToCloud = true;
-      }
-    } catch {}
+    if (!pushApiUnavailable) {
+      try {
+        const res = await fetch('/api/push/notifications', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify(clean(record)),
+        });
+        if (isJsonResponse(res)) {
+          syncedToCloud = true;
+        } else if (res.ok && (res.headers.get('content-type') || '').includes('text/html')) {
+          pushApiUnavailable = true;
+        }
+      } catch {}
+    }
 
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent(NOTIF_UPDATED_EVENT));
@@ -2023,22 +2032,29 @@ export const notificationService = {
 
     const fetchAndEmit = async () => {
       if (!active) return;
-      try {
-        const res = await fetch('/api/push/notifications', { cache: 'no-store' });
-        if (res.ok) {
-          const data = await res.json();
-          const serverItems: PushNotificationRecord[] = Array.isArray(data?.notifications)
-            ? data.notifications
-            : [];
-          if (serverItems.length > 0) {
-            writeLocalNotifs(serverItems);
+      if (!pushApiUnavailable) {
+        try {
+          const res = await fetch('/api/push/notifications', {
+            cache: 'no-store',
+            headers: { Accept: 'application/json' },
+          });
+          if (isJsonResponse(res)) {
+            const data = await res.json();
+            const serverItems: PushNotificationRecord[] = Array.isArray(data?.notifications)
+              ? data.notifications
+              : [];
+            if (serverItems.length > 0) {
+              writeLocalNotifs(serverItems);
+            }
+            if (active) {
+              onUpdate(serverItems.length > 0 ? serverItems : readLocalNotifs());
+            }
+            return;
+          } else if (res.ok && (res.headers.get('content-type') || '').includes('text/html')) {
+            pushApiUnavailable = true;
           }
-          if (active) {
-            onUpdate(serverItems.length > 0 ? serverItems : readLocalNotifs());
-          }
-          return;
-        }
-      } catch {}
+        } catch {}
+      }
       if (active) {
         onUpdate(readLocalNotifs());
       }
@@ -2049,7 +2065,7 @@ export const notificationService = {
     const intervalId =
       typeof window !== 'undefined'
         ? window.setInterval(() => {
-            if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+            if (!pushApiUnavailable && (typeof document === 'undefined' || document.visibilityState === 'visible')) {
               fetchAndEmit();
             }
           }, 12000)
@@ -2080,18 +2096,20 @@ export const notificationService = {
 
   /** Saves or updates a citizen device Web Push subscription on the backend push registry */
   async savePushSubscription(docData: PushSubscriptionDoc): Promise<boolean> {
-    if (!docData?.id || !docData?.endpoint) return false;
+    if (!docData?.id || !docData?.endpoint || pushApiUnavailable) return false;
     try {
       const res = await fetch('/api/push/subscribe', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify(clean(docData)),
       });
-      if (res.ok) {
+      if (isJsonResponse(res)) {
         if (typeof window !== 'undefined') {
           window.dispatchEvent(new CustomEvent(SUBS_UPDATED_EVENT));
         }
         return true;
+      } else if (res.ok && (res.headers.get('content-type') || '').includes('text/html')) {
+        pushApiUnavailable = true;
       }
     } catch {}
     return false;
@@ -2099,9 +2117,18 @@ export const notificationService = {
 
   /** Lists all stored Web Push subscriptions from the backend push registry */
   async getPushSubscriptions(): Promise<PushSubscriptionDoc[]> {
+    if (pushApiUnavailable) return [];
     try {
-      const res = await fetch('/api/push/subscribers', { cache: 'no-store' });
-      if (!res.ok) return [];
+      const res = await fetch('/api/push/subscribers', {
+        cache: 'no-store',
+        headers: { Accept: 'application/json' },
+      });
+      if (!isJsonResponse(res)) {
+        if (res.ok && (res.headers.get('content-type') || '').includes('text/html')) {
+          pushApiUnavailable = true;
+        }
+        return [];
+      }
       const data = await res.json();
       const list = Array.isArray(data?.subscribers) ? data.subscribers : [];
       return list.map((s: any) => ({

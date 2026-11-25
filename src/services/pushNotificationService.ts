@@ -167,8 +167,13 @@ export const pushNotificationService = {
         return { permission, subscribed: false };
       }
 
-      const keyRes = await fetch('/api/push/vapid-public-key');
-      if (!keyRes.ok) {
+      const keyRes = await fetch('/api/push/vapid-public-key', {
+        headers: { Accept: 'application/json' },
+      });
+      const contentType = keyRes.headers.get('content-type') || '';
+      if (!keyRes.ok || !contentType.includes('application/json')) {
+        // Static hosting (e.g. Cloudflare Pages SPA fallback returning index.html)
+        // does not serve Express /api/push/* endpoints; gracefully skip VAPID subscription.
         return { permission, subscribed: false };
       }
       const keyJson = await keyRes.json();
